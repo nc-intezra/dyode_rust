@@ -394,7 +394,11 @@ fn main() {
         "systemd-unit" => cmd_unit(args),
         "logs" => cmd_logs(args),
         "version" | "--version" | "-V" => {
-            println!("dyode {} (lidi 3.0.0)", env!("CARGO_PKG_VERSION"))
+            println!(
+                "dyode {} (lidi 3.0.0, {})",
+                env!("CARGO_PKG_VERSION"),
+                lidi_command_utils::ALLOCATOR_NAME
+            )
         }
         "help" | "--help" | "-h" => print!("{USAGE}"),
         other => die_usage(&format!("unknown command {other:?}")),

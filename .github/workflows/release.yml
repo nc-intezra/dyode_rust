@@ -1,35 +1,245 @@
-name: Release
+# Builds the offline install bundle on GitHub's machines -- which have the
+# internet access an air-gapped DYODE box does not -- proves that it
+# installs with no network on every supported system, and on a tag
+# publishes it with the release:
+#
+#   dyode-<version>-offline.tar.gz   binaries (amd64, arm64), OS
+#                                    packages per system, installer, docs,
+#                                    and the vendored source
+#   dyode-<version>-linux-<arch>     the binary alone (glibc >= 2.36)
+#   dyode-<version>-src.tar.gz       source + Cargo.lock + vendored crates
+#
+# Runs on tags, by hand ("Run workflow"), and on pull requests that change
+# the installer or the build tools.
+name: Release / offline bundle
+
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "install.sh"
+      - "tools/**"
+      - "packaging/**"
+      - "Cargo.toml"
+      - ".github/workflows/release.yml"
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            arch: x86_64
-          - os: ubuntu-24.04-arm
-            arch: aarch64
-    runs-on: ${{ matrix.os }}
+  source:
+    name: vendored source
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --locked || cargo build --release
-      - name: Package
+      - id: v
+        run: echo "version=$(sed -n 's/^version = \"\(.*\)\"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+      - name: Lock and vendor every dependency
         run: |
-          name=dyode-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}
-          mkdir -p "$name/target/release"
-          cp target/release/dyode "$name/target/release/"
-          cp -r install.sh config.example.yaml packaging README.md CAVEATS.md CHANGELOG.md LICENSE docs "$name/"
-          tar czf "$name.tar.gz" "$name"
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
-      - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+          [ -f Cargo.lock ] || cargo generate-lockfile
+          mkdir -p .cargo
+          cargo vendor --locked vendor > .cargo/config.toml
+      - name: Source tarball
+        env:
+          NAME: dyode-${{ steps.v.outputs.version }}-src
+        run: |
+          mkdir -p dist
+          git ls-files > files.txt
+          printf '%s\n' Cargo.lock .cargo/config.toml >> files.txt
+          find vendor -type f >> files.txt
+          tar --transform "s#^#$NAME/#" -czf "dist/$NAME.tar.gz" -T files.txt
+          du -h "dist/$NAME.tar.gz"
+      - uses: actions/upload-artifact@v4
         with:
-          files: dyode-*.tar.gz*
+          name: source
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  binary:
+    name: binary (${{ matrix.arch }})
+    needs: source
+    strategy:
+      matrix:
+        include:
+          - { arch: amd64, os: ubuntu-24.04 }
+          - { arch: arm64, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: source
+      # Built from the vendored source, in Debian 12 (glibc 2.36), in a
+      # container with no network: proves the source tarball rebuilds
+      # offline, and that the binary runs on the oldest supported system.
+      - name: Build (offline, from the vendored source)
+        run: |
+          tar xzf dyode-*-src.tar.gz
+          cd dyode-*-src
+          if ! OFFLINE=1 tools/build_binary.sh > build.log 2>&1; then
+            cat build.log
+            # The tail of the failure as one annotation, readable from the
+            # run summary without opening the log.
+            echo "::error title=build failed::$(tail -40 build.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+            exit 1
+          fi
+          tail -3 build.log
+          cp target/portable/release/dyode "$GITHUB_WORKSPACE/dyode-${{ matrix.arch }}"
+      - name: Test the binary
+        run: |
+          ./dyode-${{ matrix.arch }} version | grep mimalloc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.arch }}
+          path: dyode-${{ matrix.arch }}
+          if-no-files-found: error
+
+  debs:
+    name: OS packages (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - ubuntu-24.04/amd64
+          - ubuntu-24.04/arm64
+          - ubuntu-26.04/amd64
+          - ubuntu-26.04/arm64
+          - debian-12/amd64
+          - debian-12/arm64      # also Raspberry Pi OS bookworm (64-bit)
+          - debian-13/amd64
+          - debian-13/arm64      # also Raspberry Pi OS trixie (64-bit)
+    runs-on: ${{ endsWith(matrix.target, '/arm64') && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download packages
+        env:
+          TARGETS: ${{ matrix.target }}
+        run: tools/build_debs.sh
+      - id: name
+        env:
+          TARGET: ${{ matrix.target }}
+        run: echo "name=debs-${TARGET//\//-}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.name }}
+          path: packaging/debs
+          if-no-files-found: error
+
+  bundle:
+    needs: [source, binary, debs]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: debs-*
+          path: packaging/debs
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: source
+      - name: Assemble
+        run: |
+          chmod +x dyode-amd64 dyode-arm64
+          tools/build_bundle.sh --bin amd64=dyode-amd64 --bin arm64=dyode-arm64 \
+            --source dyode-*-src.tar.gz --out dist
+          cat dist/dyode-*/BUNDLE.txt
+      - name: Summary
+        run: |
+          {
+            echo "### Offline bundle"
+            echo
+            echo '```'
+            cat dist/dyode-*/BUNDLE.txt
+            echo '```'
+            echo
+            echo "| part | files | size |"
+            echo "|---|---|---|"
+            for d in dist/dyode-*/packaging/debs/*/*/; do
+              echo "| ${d#*/packaging/debs/} | $(ls "$d"*.deb | wc -l) | $(du -sh "$d" | cut -f1) |"
+            done
+            echo "| **bundle** | | $(du -h dist/*-offline.tar.gz | cut -f1) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: dist/*-offline.tar.gz*
+          if-no-files-found: error
+
+  # The proof: unpack the bundle in a clean container of each system, with
+  # NO network, and install both sides from it.
+  verify:
+    name: offline install (${{ matrix.target }})
+    needs: bundle
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - ubuntu-24.04/amd64
+          - ubuntu-24.04/arm64
+          - ubuntu-26.04/amd64
+          - ubuntu-26.04/arm64
+          - debian-12/amd64
+          - debian-12/arm64
+          - debian-13/amd64
+          - debian-13/arm64
+    runs-on: ${{ endsWith(matrix.target, '/arm64') && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle
+      - name: Install with --network none
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          dir="${TARGET%/*}"; image="${dir%%-*}:${dir#*-}"
+          docker pull -q "$image"
+          docker run --rm --network none -v "$PWD:/b:ro" "$image" bash -euc '
+            mkdir /x && tar -C /x -xzf /b/dyode-*-offline.tar.gz && cd /x/dyode-*
+            ./install.sh --offline --side out --with ssh,nfs,smb --no-enable
+            ./install.sh --offline --side in --no-enable --etc /etc/dyode-in
+            command -v nft ip sshd smbd >/dev/null
+            dyode version
+            dyode new-key -c /etc/dyode/config.yaml
+            dyode check -c /etc/dyode/config.yaml --side out
+            dyode firewall-rules -c /etc/dyode/config.yaml | grep -q "table inet dyode"
+            # A damaged copy must be refused before anything changes.
+            cp -r . /tmp/damaged && printf x >> /tmp/damaged/README.md
+            if /tmp/damaged/install.sh --offline --side in --dry-run; then
+              echo "a damaged bundle was accepted" >&2; exit 1
+            fi
+            echo "offline install OK on '"$TARGET"'"
+          '
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [verify]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{bundle,source,bin-*}"
+          merge-multiple: true
+      - name: Name the files
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          for a in amd64 arm64; do mv "dyode-$a" "dyode-$v-linux-$a"; done
+          sha256sum dyode-* > SHA256SUMS
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dyode-*
+            SHA256SUMS

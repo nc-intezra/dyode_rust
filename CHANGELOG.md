@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.0.1] - unreleased
+
+### Added
+
+- **Offline install bundle**, as DYODE (Python) 1.5 had:
+  `dyode-<version>-offline.tar.gz` on every release, holding the binaries
+  for amd64 and arm64 (built in Debian 12, so they run on every supported
+  system: glibc 2.36 or newer; with mimalloc), the OS packages
+  (nftables, iproute2, optional SSH/NFS/SMB servers) for Ubuntu 24.04/26.04
+  and Debian / Raspberry Pi OS 12/13 on both CPUs, and the source with every
+  dependency vendored.  See docs/OFFLINE.md.
+- `install.sh --offline` / `--online` / `--with ssh,nfs,smb` /
+  `--skip-os-packages`.  Offline, the whole bundle is checked against
+  SHA256SUMS (unlisted files refused) before anything changes, and the
+  packages go in through a private, file-only apt repository.
+- Release workflow: builds the binaries from the vendored source with
+  `--offline`, in a container without network, fetches the packages in clean containers, and installs the
+  bundle in a `--network none` container of every supported system before
+  publishing.
+- `mimalloc` cargo feature; `dyode version` names the allocator.
+
+### Fixed
+
+- `install.sh` no longer asks a DYODE v2 box for a message key before
+  enabling its service.
+
 ## [2.0.0] - 2026-10-26
 
 First Rust release: a port of DYODE (Python) 1.5.0, with ANSSI's lidi as

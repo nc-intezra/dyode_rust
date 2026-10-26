@@ -1,6 +1,6 @@
 [package]
 name = "dyode"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
@@ -17,6 +17,8 @@ path = "src/main.rs"
 
 [features]
 default = []
+# mimalloc as the global allocator (through lidi), for the release binaries.
+mimalloc = ["lidi-send/mimalloc", "lidi-receive/mimalloc"]
 # Prometheus metrics from the embedded lidi engines (lidi.prometheus_listen).
 prometheus = ["lidi-send/prometheus", "lidi-receive/prometheus"]
 

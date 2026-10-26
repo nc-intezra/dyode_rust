@@ -36,6 +36,10 @@ UDP framing.  See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quick start
 
+Air-gapped box?  Carry `dyode-<version>-offline.tar.gz` from the release
+and run `sudo ./install.sh --offline --side in|out` from it: see
+[docs/OFFLINE.md](docs/OFFLINE.md).  With internet access:
+
 ```bash
 cargo build --release                       # -> target/release/dyode
 sudo ./install.sh --side in                 # on the input box
