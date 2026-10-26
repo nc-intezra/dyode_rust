@@ -17,8 +17,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-# mimalloc as the global allocator (through lidi).  Used for the static
-# musl release binaries: musl's own malloc is slow under lidi's threads.
+# mimalloc as the global allocator (through lidi), for the release binaries.
 mimalloc = ["lidi-send/mimalloc", "lidi-receive/mimalloc"]
 # Prometheus metrics from the embedded lidi engines (lidi.prometheus_listen).
 prometheus = ["lidi-send/prometheus", "lidi-receive/prometheus"]

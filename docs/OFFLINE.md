@@ -18,7 +18,7 @@ Inside an unpacked bundle, `--offline` is the default.
 
 | Path | Contents |
 |---|---|
-| `bin/amd64/dyode`, `bin/arm64/dyode` | the program, statically linked (musl, mimalloc): one file per CPU, no library dependencies, whatever the system's glibc |
+| `bin/amd64/dyode`, `bin/arm64/dyode` | the program, one file per CPU, built in Debian 12 so it runs on every supported system (needs only glibc 2.36+ and libgcc_s); with mimalloc |
 | `packaging/debs/<os>-<release>/<arch>/` | the OS packages DYODE may need, with their dependencies, for each supported system |
 | `source/dyode-<version>-src.tar.gz` | the source with `Cargo.lock` and every dependency vendored: rebuild without a network |
 | `install.sh`, `config.example.yaml`, `packaging/`, `docs/`, `tools/` | as in the repository |
@@ -48,8 +48,15 @@ Each is installed only when the box lacks it.
 archive and reports itself as Debian, so the `debian-*` folders serve it.
 32-bit Raspberry Pi OS (armhf) is not covered.
 
-On any other system the binary still runs (it is static); install the
-packages above by hand and use `--skip-os-packages`.
+On any other Linux with glibc 2.36 or newer the binary runs as well; install
+the packages above by hand and use `--skip-os-packages`.
+
+**Why not a static (musl) binary?**  lidi 3.0.0 does not build for musl:
+`lidi-receive` passes `libc::MSG_WAITFORONE` (an `i32`) to `recvmmsg`, whose
+flags argument is a `u32` on musl.  Dropping lidi's `recvmmsg` mode would
+cost receive throughput, so the binary links glibc instead, built against
+the oldest one supported.  Once lidi builds for musl, a fully static binary
+is a one-line change to `tools/build_binary.sh`.
 
 ## How the installer stays safe
 
@@ -72,9 +79,10 @@ requests that touch the installer or tools):
 
 1. **source** -- `cargo generate-lockfile` (if needed) and `cargo vendor`, into
    `dyode-<version>-src.tar.gz`.
-2. **static** -- the binaries are built *from that vendored source with
-   `--offline`*, on native amd64 and arm64 runners, which proves the source
-   tarball rebuilds without a network.
+2. **binary** -- the binaries are built *from that vendored source with
+   `--offline`*, in a Debian 12 container with no network, on native amd64
+   and arm64 runners: the source tarball provably rebuilds offline, and the
+   binary is checked to need no glibc newer than 2.36.
 3. **debs** -- `tools/build_debs.sh`, one clean container per system, with
    apt `--download-only`.
 4. **bundle** -- `tools/build_bundle.sh` assembles and checksums it.
@@ -85,19 +93,21 @@ requests that touch the installer or tools):
 6. **publish** (tags only) -- the bundle, the source tarball and the bare
    binaries are attached to the release, with `SHA256SUMS`.
 
-By hand, on a machine with internet, Docker and musl-tools:
+By hand, on a machine with internet and Docker:
 
 ```bash
-tools/build_static.sh                     # this CPU's static binary
+tools/build_binary.sh                     # this CPU's portable binary
 TARGETS="debian-13/arm64" tools/build_debs.sh
-tools/build_bundle.sh --bin arm64=target/aarch64-unknown-linux-musl/release/dyode
+tools/build_bundle.sh --bin arm64=target/portable/release/dyode
 ```
 
 ## Rebuilding from source, offline
 
 ```bash
 tar xzf source/dyode-2.0.1-src.tar.gz && cd dyode-2.0.1-src
-cargo build --release --offline --locked          # or: OFFLINE=1 tools/build_static.sh
+cargo build --release --offline --locked --features mimalloc
+# or, portable like the release (needs Docker and the rust:1-bookworm image):
+OFFLINE=1 tools/build_binary.sh
 ```
 
 Needs a Rust toolchain (1.85 or newer) on the build machine; nothing is

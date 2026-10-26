@@ -6,7 +6,7 @@
 #   tools/build_debs.sh
 #   TARGETS="ubuntu-24.04/amd64 debian-13/arm64" tools/build_debs.sh
 #
-# DYODE itself is one static binary and needs no OS packages beyond:
+# DYODE itself is one self-contained binary and needs no OS packages beyond:
 #   nftables   the output box's diode-port firewall (install.sh)
 #   iproute2   'ip neigh', for the input box's static ARP entry
 # plus the optional services for serving received files that

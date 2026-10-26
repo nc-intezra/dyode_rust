@@ -5,8 +5,9 @@
 ### Added
 
 - **Offline install bundle**, as DYODE (Python) 1.5 had:
-  `dyode-<version>-offline.tar.gz` on every release, holding static
-  binaries (musl, mimalloc) for amd64 and arm64, the OS packages
+  `dyode-<version>-offline.tar.gz` on every release, holding the binaries
+  for amd64 and arm64 (built in Debian 12, so they run on every supported
+  system: glibc 2.36 or newer; with mimalloc), the OS packages
   (nftables, iproute2, optional SSH/NFS/SMB servers) for Ubuntu 24.04/26.04
   and Debian / Raspberry Pi OS 12/13 on both CPUs, and the source with every
   dependency vendored.  See docs/OFFLINE.md.
@@ -15,7 +16,7 @@
   SHA256SUMS (unlisted files refused) before anything changes, and the
   packages go in through a private, file-only apt repository.
 - Release workflow: builds the binaries from the vendored source with
-  `--offline`, fetches the packages in clean containers, and installs the
+  `--offline`, in a container without network, fetches the packages in clean containers, and installs the
   bundle in a `--network none` container of every supported system before
   publishing.
 - `mimalloc` cargo feature; `dyode version` names the allocator.

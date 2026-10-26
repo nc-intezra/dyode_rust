@@ -7,7 +7,7 @@
 # Layout of dist/dyode-<version>/ (and dist/dyode-<version>-offline.tar.gz):
 #
 #   install.sh, config.example.yaml, README.md, CAVEATS.md, ...   as in the repo
-#   bin/<arch>/dyode                 static binaries (tools/build_static.sh)
+#   bin/<arch>/dyode                 binaries (tools/build_binary.sh)
 #   packaging/debs/<os>-<ver>/<arch>/  OS packages (tools/build_debs.sh), each
 #                                    folder with its own SHA256SUMS
 #   source/dyode-<version>-src.tar.gz  the source with every dependency

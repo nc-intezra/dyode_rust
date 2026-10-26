@@ -34,7 +34,7 @@
 # DYODE is one self-contained binary: there is no virtualenv, no Python
 # wheel and no udpcast to install.  For an air-gapped box, carry the
 # offline bundle (dyode-<version>-offline.tar.gz, from the GitHub release)
-# across: it holds static binaries for amd64 and arm64, the OS packages for
+# across: it holds the binaries for amd64 and arm64, the OS packages for
 # every supported system, and the vendored source.  See docs/OFFLINE.md.
 set -euo pipefail
 

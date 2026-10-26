@@ -3,10 +3,10 @@
 # installs with no network on every supported system, and on a tag
 # publishes it with the release:
 #
-#   dyode-<version>-offline.tar.gz   static binaries (amd64, arm64), OS
+#   dyode-<version>-offline.tar.gz   binaries (amd64, arm64), OS
 #                                    packages per system, installer, docs,
 #                                    and the vendored source
-#   dyode-<version>-linux-<arch>     the static binary alone
+#   dyode-<version>-linux-<arch>     the binary alone (glibc >= 2.36)
 #   dyode-<version>-src.tar.gz       source + Cargo.lock + vendored crates
 #
 # Runs on tags, by hand ("Run workflow"), and on pull requests that change
@@ -64,8 +64,8 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  static:
-    name: static binary (${{ matrix.arch }})
+  binary:
+    name: binary (${{ matrix.arch }})
     needs: source
     strategy:
       matrix:
@@ -74,31 +74,27 @@ jobs:
           - { arch: arm64, os: ubuntu-24.04-arm }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: dtolnay/rust-toolchain@stable
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
       - uses: actions/download-artifact@v4
         with:
           name: source
-      # Built from the vendored source with --offline, which proves the
-      # source tarball rebuilds without a network.
+      # Built from the vendored source, in Debian 12 (glibc 2.36), in a
+      # container with no network: proves the source tarball rebuilds
+      # offline, and that the binary runs on the oldest supported system.
       - name: Build (offline, from the vendored source)
-        env:
-          CARGO_NET_OFFLINE: "true"
         run: |
           tar xzf dyode-*-src.tar.gz
           cd dyode-*-src
-          if ! OFFLINE=1 tools/build_static.sh > build.log 2>&1; then
+          if ! OFFLINE=1 tools/build_binary.sh > build.log 2>&1; then
             cat build.log
             # The tail of the failure as one annotation, readable from the
             # run summary without opening the log.
-            echo "::error title=static build failed::$(tail -40 build.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+            echo "::error title=build failed::$(tail -40 build.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
             exit 1
           fi
           tail -3 build.log
-          cp target/*-unknown-linux-musl/release/dyode "$GITHUB_WORKSPACE/dyode-${{ matrix.arch }}"
-      - name: Test the static binary
+          cp target/portable/release/dyode "$GITHUB_WORKSPACE/dyode-${{ matrix.arch }}"
+      - name: Test the binary
         run: |
-          file dyode-${{ matrix.arch }} | grep -E "statically linked|static-pie"
           ./dyode-${{ matrix.arch }} version | grep mimalloc
       - uses: actions/upload-artifact@v4
         with:
@@ -138,7 +134,7 @@ jobs:
           if-no-files-found: error
 
   bundle:
-    needs: [source, static, debs]
+    needs: [source, binary, debs]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
