@@ -1,0 +1,17 @@
+[Unit]
+Description=Pack last week's rotated DYODE logs into a tarball
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/dyode logs --archive --keep-weeks 26
+User=root
+Nice=10
+IOSchedulingClass=idle
+
+# The tool only reads and writes the log directory.
+ProtectSystem=strict
+ReadWritePaths=/var/log/dyode-transfer
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes

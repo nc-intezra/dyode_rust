@@ -1,0 +1,49 @@
+[package]
+name = "dyode"
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+description = "DYODE: a low-cost DIY data diode for ICS, with lidi (RaptorQ) as its transport"
+repository = "https://github.com/nc-intezra/dyode_rust"
+
+[lib]
+name = "dyode"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dyode"
+path = "src/main.rs"
+
+[features]
+default = []
+# Prometheus metrics from the embedded lidi engines (lidi.prometheus_listen).
+prometheus = ["lidi-send/prometheus", "lidi-receive/prometheus"]
+
+[dependencies]
+# --- lidi (ANSSI-FR), pinned to the v3.0.0 release, used as a library ---
+lidi-protocol = { git = "https://github.com/ANSSI-FR/lidi", tag = "v3.0.0", default-features = false }
+lidi-command-utils = { git = "https://github.com/ANSSI-FR/lidi", tag = "v3.0.0", default-features = false }
+lidi-send = { git = "https://github.com/ANSSI-FR/lidi", tag = "v3.0.0", default-features = false, features = ["heartbeat", "send-mmsg", "send-msg", "send-native"] }
+lidi-receive = { git = "https://github.com/ANSSI-FR/lidi", tag = "v3.0.0", default-features = false, features = ["heartbeat", "receive-mmsg", "receive-msg", "receive-native"] }
+
+crc32fast = "1"
+crossbeam-channel = "0.5"
+flate2 = "1"
+getrandom = "0.4"
+glob = "0.3"
+hmac = "0.12"
+libc = "0.2"
+log = { version = "0.4", features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
+toml = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

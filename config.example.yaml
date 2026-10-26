@@ -1,0 +1,140 @@
+# DYODE configuration.  Copy the SAME file to both the input and the output
+# box, as config.yaml (beside the dyode binary, in the working directory,
+# or /etc/dyode/config.yaml).
+#
+# Existing DYODE (Python) config.yaml files load unchanged: keys that only
+# meant something to udpcast (fec, autostart, start_timeout, file_gap) are
+# accepted and reported as ignored, and module 'port' keys are kept for
+# reference only -- every module now travels over the lidi ports below.
+config_name: "Dyode test"
+config_version: 1.0
+config_date: 2016-05-04
+
+dyode_in:
+  ip: 10.0.1.1
+  mac: b8:27:eb:89:1e:f3
+  interface: eth0          # NIC facing the diode, default eth0
+  arp_interval: 60         # seconds between re-asserting the static ARP
+                           # entry.  It is lost when the NIC goes down and
+                           # comes back, and without it every transfer is
+                           # dropped by our own kernel while the sender
+                           # still reports success.
+dyode_out:
+  ip: 10.0.1.2
+  mac: b8:27:eb:b1:ff:ab   # used for the static ARP entry on the input box
+  interface: eth1          # NIC facing the diode, default eth1
+
+# Transport: lidi (ANSSI-FR) with RaptorQ forward error correction,
+# embedded in DYODE.  Everything here must be identical on both boxes --
+# which it is, since both read this file.  All keys are optional.
+lidi:
+  ports: [5000]            # UDP ports through the diode; one RaptorQ
+                           # encode/decode thread per port.  More ports =
+                           # more throughput on multi-core boxes.
+  # mtu: 1500              # of the diode link; 9000 for jumbo frames
+  # block: 220000          # RaptorQ block size, bytes
+  # repair: 5              # repair packets, % of each block (lidi adds 2
+                           # more).  The diode has no return path: a block
+                           # that loses more than this is lost, and every
+                           # transfer in flight with it.  Raise on a lossy
+                           # link.
+  # heartbeat: 10          # seconds; the output box warns when it stops
+  # max_clients: auto      # simultaneous transfers (default: modules + 2)
+  # mode: mmsg             # native | msg | mmsg (sendmmsg/recvmmsg)
+  # reset_timeout: 2       # receiver: decoder reset after this much silence
+  # abort_timeout: 120     # receiver: drop a transfer idle this long (0 = never)
+  # client_queue_size: 1024  # receiver: blocks buffered per transfer before
+                           # it is dropped (protects memory if the disk
+                           # cannot keep up)
+  # max_mbps: 100          # cap on everything sent, Mbit/s (0 = no cap).
+                           # lidi sends each block as one burst at line
+                           # rate; a receiver, NIC or converter that cannot
+                           # absorb it drops packets.  Raise this only after
+                           # measuring the link (see CAVEATS.md).
+  # log_level: warn        # lidi's own messages: off|error|warn|info|debug
+  # send_bind: 10.0.1.1:0  # source of the UDP packets (default dyode_in.ip:0)
+
+# Logs always go to stderr as well, so journalctl still works.  Rotation is
+# logrotate's job -- see packaging/logrotate/dyode-transfer.
+logging:
+  dir: /var/log/dyode-transfer   # absolute; empty string = stderr only
+  human: dyode.log               # every module, human-readable
+  json: transfer.jsonl           # one JSON object per line
+  per_file_events: true          # false = batch summaries only
+
+# Every envelope through the diode is signed with a shared key: the SAME
+# dyode.key file must sit beside config.yaml on both boxes.  Create it once
+# with: dyode new-key
+# auth:
+#   key_file: dyode.key        # relative to this file's folder
+#   required: true             # false = run unauthenticated (not recommended)
+
+modules:
+  "Partage de fichier 1":
+    type: folder
+    in: /home/pi/in
+    out: /home/pi/out
+    # optional: settle: 2       seconds a file must be unchanged before sending
+    # optional: rescan: 30      seconds between full rescans
+    # optional: bitrate: 100    Mbit/s cap for this module (default: none)
+    # optional: keep_sent_hours: 24
+    #                           sent files are moved to .dyode_sent and kept
+    #                           this long instead of being deleted, because a
+    #                           diode gives no proof of delivery.  Copy one
+    #                           back here to re-send it.  0 = delete.
+    # optional: staging: /srv/dyode-incoming
+    #                           where incoming files are written before they
+    #                           are verified.  Default is <out>.incoming.  It
+    #                           MUST NOT be inside 'out'.  Keep it on the same
+    #                           filesystem as 'out' so the final move stays
+    #                           atomic.
+    # optional: batch_timeout: 300
+    #                           seconds with nothing received before a batch
+    #                           with files missing is closed and the missing
+    #                           files named in the log.
+
+  "Automate Modbus 1":
+    type: modbus            # case does not matter ("Modbus" works)
+    ip: 192.168.1.150       # PLC address (input side)
+    port_out: 502           # Modbus server port (output side)
+    # Ranges are start-end with the end EXCLUDED: 0-100 = addresses 0..99.
+    registers:
+      - 0-100
+      - 400-450
+    coils:
+      - 0-10
+      - 100-110
+    # optional: plc_port: 502   unit: 1   interval: 1.0   stale_after: 10
+    # optional: bind_out: 0.0.0.0
+    # optional: unmapped: exception   reads outside the ranges above get
+    #                           Modbus exception 02; 'zero' answers 0 instead.
+    #                           Client writes always get exception 01.
+
+  "Partage d'ecran presta":
+    type: screen
+    in: /home/pi/screenz
+    out: /home/pi/screenz
+    # optional: http_port: 8080   max_fps: 10   max_streams: 8
+    # optional: http_bind: 192.168.50.4   default: the first address not on
+    #                           the diode NIC (the IT side)
+
+  "Journaux OT":
+    type: logs              # stream logs one way, OT -> IT
+    # --- input box: sources (at least one) ---
+    listen_udp: 514         # syslog over UDP; "10.0.0.1:514" binds one NIC
+    # listen_tcp: 601       # syslog over TCP (LF or octet-counted framing)
+    # tail:                 # follow files like tail -F (globs allowed)
+    #   - /var/log/plc/*.log
+    # allow_from: [192.168.1.0/24]   # accept syslog only from these networks
+    # --- output box: destinations (at least one) ---
+    out: /var/log/dyode-ot  # writes received.log here (logrotate-friendly)
+    # forward:              # and/or send on to a SIEM / syslog server
+    #   - udp://10.20.0.5:514
+    #   - tcp://siem.example:601
+    # optional: format: prefixed      prefixed | raw | json
+    # optional: split_by_source: false  one file per sending host
+    # optional: copies: 2       every batch is sent again ~0.5s later, so a
+    #                           lost lidi block must hit both copies
+    # optional: max_kbps: 2000  cap on this module's share of the link
+    # optional: heartbeat: 10   seconds; stale_after: 30 warns on silence
+    # optional: tail_from: end  tail_state: /var/lib/dyode/tail.json
