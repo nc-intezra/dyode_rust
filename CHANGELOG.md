@@ -1,6 +1,6 @@
 # Changelog
 
-## [2.0.1] - unreleased
+## [2.0.1] - 2026-10-26
 
 ### Added
 
@@ -16,9 +16,9 @@
   SHA256SUMS (unlisted files refused) before anything changes, and the
   packages go in through a private, file-only apt repository.
 - Release workflow: builds the binaries from the vendored source with
-  `--offline`, in a container without network, fetches the packages in clean containers, and installs the
-  bundle in a `--network none` container of every supported system before
-  publishing.
+  `--offline`, in a container without network; fetches the packages in
+  clean containers; and installs the bundle in a `--network none` container
+  of every supported system before publishing.
 - `mimalloc` cargo feature; `dyode version` names the allocator.
 
 ### Fixed
