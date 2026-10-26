@@ -87,7 +87,14 @@ jobs:
         run: |
           tar xzf dyode-*-src.tar.gz
           cd dyode-*-src
-          OFFLINE=1 tools/build_static.sh
+          if ! OFFLINE=1 tools/build_static.sh > build.log 2>&1; then
+            cat build.log
+            # The tail of the failure as one annotation, readable from the
+            # run summary without opening the log.
+            echo "::error title=static build failed::$(tail -40 build.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+            exit 1
+          fi
+          tail -3 build.log
           cp target/*-unknown-linux-musl/release/dyode "$GITHUB_WORKSPACE/dyode-${{ matrix.arch }}"
       - name: Test the static binary
         run: |
