@@ -3,3 +3,4 @@
 # Local secrets and configuration
 dyode.key
 /config.yaml
+/dist

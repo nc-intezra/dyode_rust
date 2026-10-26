@@ -72,7 +72,9 @@ nothing listens on any more.
 
 * The curses setup wizard.  Its non-interactive parts are commands:
   `dyode interfaces` (NICs and MACs), `dyode systemd-unit`, `dyode check`.
-* The offline `.deb`/wheel bundle: DYODE is a single binary now; for an
-  air-gapped box, build once and copy `target/release/dyode` with this folder.
-* The NFS/SMB/SFTP share helper (`install.sh --share-*`).  Configure shares
-  of the `out` folders as usual; never share the `*.incoming` staging folder.
+* The NFS/SMB share *configuration* (`/etc/exports`, `smb.conf`).
+  `install.sh --with ssh,nfs,smb` installs the servers, online or offline;
+  configure the shares of the `out` folders yourself, and never share the
+  `*.incoming` staging folder.
+
+The offline install bundle is back in 2.0.1: see docs/OFFLINE.md.

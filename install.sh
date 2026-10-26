@@ -4,10 +4,24 @@
 #   sudo ./install.sh --side in            input (sending) box
 #   sudo ./install.sh --side out           output (receiving) box
 #   sudo ./install.sh --side out --variant v2   DYODE v2 (serial link)
+#   sudo ./install.sh --offline --side out      from the offline bundle only
+#
+# Where things come from:
+#   --offline          only the files in this folder: the offline bundle
+#                      (bin/<cpu>/dyode, packaging/debs/).  Nothing is
+#                      fetched.  The whole bundle is checked against
+#                      SHA256SUMS before anything is changed.
+#   --online           apt for OS packages; cargo may build the binary
+#                      (default: offline when this folder is a bundle)
+#   --with LIST        also install file-sharing services for the received
+#                      files: ssh, nfs, smb (comma-separated).  Packages only:
+#                      configure the shares yourself (never share *.incoming).
+#   --skip-os-packages install no OS packages (nftables, iproute2, services)
 #
 # Options:
-#   --binary PATH      use this dyode binary (default: target/release/dyode,
-#                      built with cargo if missing)
+#   --binary PATH      use this dyode binary (default: the bundle's
+#                      bin/<cpu>/dyode, else target/release/dyode, built with
+#                      cargo if missing and --online)
 #   --prefix DIR       where the binary goes (default /usr/local/bin)
 #   --etc DIR          where config.yaml and dyode.key live (default /etc/dyode)
 #   --no-firewall      do not install the diode-port nftables rules (out side)
@@ -18,12 +32,14 @@
 #   --dry-run          say what would be done, change nothing
 #
 # DYODE is one self-contained binary: there is no virtualenv, no Python
-# wheel and no udpcast to install.  For an air-gapped box, build it once
-# (cargo build --release) on a machine with the same CPU architecture and
-# copy target/release/dyode with this folder.
+# wheel and no udpcast to install.  For an air-gapped box, carry the
+# offline bundle (dyode-<version>-offline.tar.gz, from the GitHub release)
+# across: it holds static binaries for amd64 and arm64, the OS packages for
+# every supported system, and the vendored source.  See docs/OFFLINE.md.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+MODE="" WITH="" SKIP_OS=0
 SIDE="" VARIANT="v1" BINARY="" PREFIX="/usr/local/bin" ETC="${DYODE_ETC_DIR:-/etc/dyode}"
 NO_FIREWALL=0 NO_TUNING=0 FIREWALL_ONLY=0 TUNING_ONLY=0 NO_ENABLE=0 DRY_RUN=0
 SYS_ETC="${DYODE_ETC:-/etc}"
@@ -47,12 +63,20 @@ while [ $# -gt 0 ]; do
     --tuning-only) TUNING_ONLY=1; shift ;;
     --no-enable) NO_ENABLE=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --offline) MODE=offline; shift ;;
+    --online) MODE=online; shift ;;
+    --with) WITH="${2:-}"; shift 2 ;;
+    --skip-os-packages) SKIP_OS=1; shift ;;
+    -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
 done
 case "$SIDE" in in|out) ;; *) die "choose --side in or --side out" ;; esac
 case "$VARIANT" in v1|v2) ;; *) die "--variant must be v1 or v2" ;; esac
+WITH="${WITH//,/ }"
+for svc in $WITH; do
+  case "$svc" in ssh|nfs|smb) ;; *) die "--with: unknown service $svc (ssh, nfs, smb)" ;; esac
+done
 if [ "$DRY_RUN" -eq 0 ] && [ "$(id -u)" -ne 0 ] && [ -z "${DYODE_ETC:-}" ]; then
   die "run as root (sudo), or use --dry-run"
 fi
@@ -68,18 +92,144 @@ install_file() {
   echo "$backup"
 }
 
+# ------------------------------------------------------------- the host
+OS_RELEASE="${DYODE_OS_RELEASE:-/etc/os-release}"   # override: tests
+OS_ID="" OS_VER=""
+if [ -r "$OS_RELEASE" ]; then
+  OS_ID="$(. "$OS_RELEASE" && echo "${ID:-}")"
+  OS_VER="$(. "$OS_RELEASE" && echo "${VERSION_ID:-}")"
+fi
+ARCH="${DYODE_ARCH:-$(dpkg --print-architecture 2>/dev/null || true)}"   # override: tests
+if [ -z "$ARCH" ]; then
+  case "$(uname -m)" in x86_64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; *) ARCH="$(uname -m)" ;; esac
+fi
+DEB_DIR="$ROOT/packaging/debs/$OS_ID-$OS_VER/$ARCH"     # e.g. ubuntu-24.04/amd64
+BUNDLE_BIN="$ROOT/bin/$ARCH/dyode"
+SUPPORTED="Ubuntu 24.04 and 26.04, Debian 12 and 13 / Raspberry Pi OS bookworm and trixie (64-bit); amd64 and arm64"
+is_bundle() { [ -f "$ROOT/SHA256SUMS" ] && [ -d "$ROOT/bin" ]; }
+debs_present() { [ -n "$OS_ID" ] && ls "$DEB_DIR"/*.deb >/dev/null 2>&1; }
+
+if [ -z "$MODE" ]; then
+  if is_bundle; then MODE=offline; else MODE=online; fi
+fi
+
+# -------------------------------------------------------- OS packages
+# Keep in step with CORE_PKGS / SERVICE_PKGS in tools/build_debs.sh.
+service_pkgs() {
+  case "$1" in
+    ssh) echo "openssh-server openssh-sftp-server openssh-client" ;;
+    nfs) echo "nfs-kernel-server nfs-common" ;;
+    smb) echo "samba smbclient cifs-utils" ;;
+  esac
+}
+pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"; }
+PKGS=()
+if [ "$SKIP_OS" -eq 0 ] && [ "$FIREWALL_ONLY" -eq 0 ] && [ "$TUNING_ONLY" -eq 0 ]; then
+  if [ "$SIDE" = out ] && [ "$VARIANT" = v1 ] && [ "$NO_FIREWALL" -eq 0 ] && ! command -v nft >/dev/null 2>&1; then
+    PKGS+=(nftables)
+  fi
+  if [ "$SIDE" = in ] && [ "$VARIANT" = v1 ] && ! command -v ip >/dev/null 2>&1; then
+    PKGS+=(iproute2)
+  fi
+  for svc in $WITH; do
+    for pkg in $(service_pkgs "$svc"); do pkg_installed "$pkg" || PKGS+=("$pkg"); done
+  done
+  # Test hook: extra packages, to exercise the offline apt path.
+  for pkg in ${DYODE_EXTRA_PKGS:-}; do PKGS+=("$pkg"); done
+fi
+
+say "DYODE installer: $MODE install, ${OS_ID:-unknown} ${OS_VER:-?} ($ARCH), side $SIDE ($VARIANT)"
+if is_bundle; then say "  bundle:      $(sed -n '1p' "$ROOT/BUNDLE.txt" 2>/dev/null || echo "offline bundle")"; fi
+if [ "${#PKGS[@]}" -gt 0 ]; then
+  say "  OS packages: ${PKGS[*]} (from $([ "$MODE" = offline ] && echo "packaging/debs/$OS_ID-$OS_VER/$ARCH" || echo apt))"
+else
+  say "  OS packages: nothing needed"
+fi
+
+# Catch files damaged on their way across the air gap, before any change.
+check_bundle() {
+  if ! is_bundle && [ "${#PKGS[@]}" -eq 0 ] && { [ -n "$BINARY" ] || [ -x "$ROOT/target/release/dyode" ]; }; then
+    say "  (not a bundle, but nothing needs fetching: offline install from a local build)"
+    return 0
+  fi
+  is_bundle || die "--offline: this folder is not an offline bundle (no SHA256SUMS and bin/).  Download dyode-<version>-offline.tar.gz from the release, or build one with tools/build_bundle.sh"
+  step "checking the offline bundle"
+  (cd "$ROOT" && sha256sum --quiet -c SHA256SUMS) ||
+    die "files in the bundle do not match SHA256SUMS; copy the bundle again"
+  # Every binary and package must be listed: an unlisted one would be used unchecked.
+  local unlisted
+  unlisted="$(cd "$ROOT" && comm -23 \
+      <(find bin packaging/debs -type f 2>/dev/null | sort) \
+      <(sed 's/^[0-9a-f]*  \*\{0,1\}//' SHA256SUMS | sort))"
+  [ -z "$unlisted" ] || die "file(s) in the bundle not listed in SHA256SUMS, so they cannot be checked: $(echo $unlisted | head -c 300)"
+  say "   $(wc -l < "$ROOT/SHA256SUMS" | tr -d ' ') files intact"
+  if [ "${#PKGS[@]}" -gt 0 ]; then
+    [ "$OS_ID" != raspbian ] || die "32-bit Raspberry Pi OS is not covered by the bundle; use the 64-bit edition, or install ${PKGS[*]} by hand and rerun with --skip-os-packages"
+    debs_present || die "no bundled OS packages for ${OS_ID:-this system} ${OS_VER} $ARCH (bundled for: $SUPPORTED).  Install ${PKGS[*]} by hand, then rerun with --skip-os-packages"
+    (cd "$DEB_DIR" && sha256sum --quiet -c SHA256SUMS) || die "packages in ${DEB_DIR#"$ROOT"/} do not match their SHA256SUMS"
+    say "   $(ls "$DEB_DIR"/*.deb | wc -l | tr -d ' ') OS packages for $OS_ID $OS_VER $ARCH"
+  fi
+}
+
+# Offline, apt is pointed at a private repository built from the bundled
+# .deb files and nothing else: apt resolves dependencies itself, installs
+# only what is missing, never downgrades a package the host has newer, and
+# cannot reach the network.
+install_offline_debs() {
+  local tmp; tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+  mkdir -p "$tmp/repo" "$tmp/lists/partial" "$tmp/parts"
+  cp "$DEB_DIR"/*.deb "$tmp/repo/"
+  chmod 755 "$tmp" "$tmp/repo"; chmod 644 "$tmp/repo"/*.deb
+  # The Packages index is made from the .deb files themselves, so it can
+  # never disagree with them; only dpkg-deb is needed.
+  for deb in "$tmp/repo"/*.deb; do
+    dpkg-deb -f "$deb"
+    printf 'Filename: ./%s\nSize: %s\nSHA256: %s\n\n' "$(basename "$deb")" \
+      "$(stat -c %s "$deb")" "$(sha256sum "$deb" | cut -d' ' -f1)"
+  done > "$tmp/repo/Packages"
+  echo "deb [trusted=yes] file:$tmp/repo ./" > "$tmp/local.list"
+  local opts=(-o "Dir::Etc::SourceList=$tmp/local.list"
+              -o "Dir::Etc::SourceParts=$tmp/parts"
+              -o "Dir::State::Lists=$tmp/lists"
+              -o "Dir::Cache::pkgcache=" -o "Dir::Cache::srcpkgcache="
+              -o "APT::Sandbox::User=root" -o "Acquire::Languages=none")
+  apt-get "${opts[@]}" -qq update
+  DEBIAN_FRONTEND=noninteractive apt-get "${opts[@]}" install -y --no-install-recommends "${PKGS[@]}" ||
+    die "the bundled packages for $OS_ID $OS_VER $ARCH cannot satisfy ${PKGS[*]} on this host (see apt above).  Rebuild them with tools/build_debs.sh, or install them by hand and rerun with --skip-os-packages"
+}
+
+install_os_packages() {
+  [ "${#PKGS[@]}" -gt 0 ] || return 0
+  step "OS packages: ${PKGS[*]}"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "   would install from $([ "$MODE" = offline ] && echo "${DEB_DIR#"$ROOT"/} via a private local apt repository" || echo apt)"
+  elif [ "$MODE" = offline ]; then
+    install_offline_debs
+  else
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${PKGS[@]}"
+  fi
+}
+
 DYODE=""
 find_binary() {
   if [ -n "$BINARY" ]; then DYODE="$BINARY"
+  elif is_bundle; then
+    [ -x "$BUNDLE_BIN" ] || die "the bundle has no binary for $ARCH (has: $(ls "$ROOT/bin" | tr '\n' ' '))"
+    DYODE="$BUNDLE_BIN"
   elif [ -x "$ROOT/target/release/dyode" ]; then DYODE="$ROOT/target/release/dyode"
-  elif command -v cargo >/dev/null 2>&1; then
+  elif [ "$MODE" = online ] && command -v cargo >/dev/null 2>&1; then
     step "building dyode (cargo build --release)"
     run cargo build --release --manifest-path "$ROOT/Cargo.toml"
     DYODE="$ROOT/target/release/dyode"
   elif [ -x "$PREFIX/dyode" ]; then DYODE="$PREFIX/dyode"
-  else die "no dyode binary: build it with 'cargo build --release' or pass --binary"
+  else die "no dyode binary: use the offline bundle, build it with 'cargo build --release', or pass --binary"
   fi
   [ "$DRY_RUN" -eq 1 ] || [ -x "$DYODE" ] || die "$DYODE is not executable"
+  "$DYODE" version >/dev/null 2>&1 || [ "$DRY_RUN" -eq 1 ] ||
+    die "$DYODE does not run on this machine ($ARCH): wrong CPU, or a damaged copy"
 }
 
 # ---------------------------------------------------------------- firewall
@@ -182,7 +332,11 @@ apply_tuning() {
 }
 
 # ------------------------------------------------------------------- main
+# Offline: check the whole bundle BEFORE changing anything, so a damaged or
+# incomplete copy stops the install instead of leaving it half done.
+[ "$MODE" = offline ] && check_bundle
 find_binary
+install_os_packages
 if [ "$FIREWALL_ONLY" -eq 1 ]; then apply_firewall; exit 0; fi
 if [ "$TUNING_ONLY" -eq 1 ]; then apply_tuning; exit 0; fi
 
@@ -231,7 +385,7 @@ if [ "$DRY_RUN" -eq 0 ] && command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true
   systemctl enable --now dyode-log-archive.timer >/dev/null 2>&1 || true
   if [ "$NO_ENABLE" -eq 0 ] && [ -f "$ETC/config.yaml" ] && { [ "$VARIANT" = v2 ] || [ -f "$ETC/dyode.key" ]; } &&
-     "$PREFIX/dyode" check -c "$ETC/config.yaml" >/dev/null 2>&1; then
+     "$PREFIX/dyode" check -c "$ETC/config.yaml" $( [ "$VARIANT" = v2 ] && echo --serial ) >/dev/null 2>&1; then
     systemctl enable --now "dyode-$SIDE.service" && say "   dyode-$SIDE.service enabled and started"
   else
     say "
