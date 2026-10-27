@@ -34,7 +34,7 @@ lidi:
                            # per CPU core minus one, up to 4, sized for the
                            # SMALLER box ('dyode check' suggests a list).
                            # Tested on hardware: [5000, 5001, 5002, 5003]
-                           # with max_mbps: 800 (CAVEATS.md).
+                           # with max_mbps: 800: 20 GB at 800.2 Mbit/s.
   # mtu: 1500              # of the diode link; 9000 for jumbo frames
   # block: 220000          # RaptorQ block size, bytes
   # repair: 5              # repair packets, % of each block (lidi adds 2

@@ -7,8 +7,8 @@
 - A `lidi.ports` list written without a space after the dashes (`-5000`),
   which YAML reads as one string, is now refused with a message saying so
   instead of "must be a list".
-- CAVEATS.md: first diode-hardware result (20 GB at ~800 Mbit/s over four
-  lidi ports), replacing "not yet run on diode hardware".
+- CAVEATS.md: first diode-hardware result (20 GB at 800.2 Mbit/s over
+  four lidi ports), replacing "not yet run on diode hardware".
 
 ## [2.0.2] - 2026-10-27
 
