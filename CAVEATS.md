@@ -82,8 +82,8 @@ lidi:
 The cap, not the link, set that speed: `max_mbps` paces the file's bytes,
 and the bucket's 50 ms starting burst accounts for the extra 0.2 Mbit/s over
 a ~200 s transfer.  On the wire, RaptorQ repair packets (`repair` 5% plus
-lidi's 2%) and packet headers come on top, so the link carried roughly
-860 Mbit/s.
+lidi's 2%) and packet headers come on top, so the wire carried roughly
+850-900 Mbit/s: most of a gigabit link.
 
 That is one data point for one link: raise `max_mbps` on your own hardware
 only as described above.  Not yet measured on hardware: many small files
