@@ -109,72 +109,108 @@ pub fn prune_sent(root: &Path, keep_sent_hours: u64) {
 }
 
 /// Send one batch.  Returns the number of files sent.
+///
+/// Up to `parallel_files` files are in flight at once, each its own lidi
+/// transfer (so its own RaptorQ encoding, spread over the lidi ports).
+/// They are started in order and their outcomes collected in order; after
+/// a failure nothing new is started, the ones in flight are finished, and
+/// the rest wait for the next pass.
 pub fn send_batch(
     module: &str,
     fc: &FolderConfig,
     link: &ModuleLink,
     files: &[(String, PathBuf)],
 ) -> usize {
+    struct InFlight<'a> {
+        rel: &'a str,
+        path: &'a Path,
+        size: u64,
+        rx: Result<crossbeam_channel::Receiver<crate::envelope::FileOutcome>, String>,
+    }
     let batch = new_batch_id();
     let started = Instant::now();
     let mut entries = Vec::new();
     let mut sent_bytes = 0u64;
     let mut failed = 0usize;
     let todo = &files[..files.len().min(MAX_BATCH_FILES)];
-    for (rel, path) in todo {
-        let Some((file, size, mtime)) = fsafe::open_ready_file(&fc.input, rel) else {
-            log::warn!(
-                "skipped {rel}: not a regular file any more (replaced by a link, or removed since the scan)"
-            );
-            Event::new("file_skipped")
-                .module(module)
-                .per_file()
-                .field("path", rel.as_str())
-                .field("reason", "not_regular_file")
-                .emit();
-            continue;
-        };
-        let mtime = mtime
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0.0, |d| d.as_secs_f64());
-        let meta = json!({"path": rel, "size": size, "mtime": mtime, "batch": batch});
-        log::info!("sending {rel} ({size} bytes)");
-        let outcome = link
-            .send_file(meta.to_string().as_bytes(), file, size)
-            .and_then(|rx| {
-                rx.recv()
-                    .map_err(|_| "lidi dropped the transfer".to_string())
-                    .and_then(|r| r)
+    let width = fc.parallel_files.max(1) as usize;
+    let mut next = todo.iter();
+    let mut flight: VecDeque<InFlight> = VecDeque::new();
+    let mut stopped = false;
+    loop {
+        while !stopped && flight.len() < width {
+            let Some((rel, path)) = next.next() else {
+                break;
+            };
+            let Some((file, size, mtime)) = fsafe::open_ready_file(&fc.input, rel) else {
+                log::warn!(
+                    "skipped {rel}: not a regular file any more (replaced by a link, or removed since the scan)"
+                );
+                Event::new("file_skipped")
+                    .module(module)
+                    .per_file()
+                    .field("path", rel.as_str())
+                    .field("reason", "not_regular_file")
+                    .emit();
+                continue;
+            };
+            let mtime = mtime
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0.0, |d| d.as_secs_f64());
+            let meta = json!({"path": rel, "size": size, "mtime": mtime, "batch": batch});
+            log::info!("sending {rel} ({size} bytes)");
+            let rx = link.send_file(meta.to_string().as_bytes(), file, size);
+            flight.push_back(InFlight {
+                rel,
+                path,
+                size,
+                rx,
             });
+        }
+        let Some(f) = flight.pop_front() else { break };
+        let outcome = f.rx.and_then(|rx| {
+            rx.recv()
+                .map_err(|_| "lidi dropped the transfer".to_string())
+                .and_then(|r| r)
+        });
         match outcome {
             Ok(digest) => {
-                retire_sent_file(&fc.input, rel, path, fc.keep_sent_hours);
-                sent_bytes += size;
+                retire_sent_file(&fc.input, f.rel, f.path, fc.keep_sent_hours);
+                sent_bytes += f.size;
                 let digest = hex::encode(digest);
                 Event::new("file_sent")
                     .module(module)
                     .per_file()
                     .field("batch", short(&batch))
-                    .field("path", rel.as_str())
-                    .field("bytes", size)
+                    .field("path", f.rel)
+                    .field("bytes", f.size)
                     .field("sha256", digest.as_str())
                     .emit();
-                entries.push(json!({"path": rel, "size": size, "sha256": digest}));
+                entries.push(json!({"path": f.rel, "size": f.size, "sha256": digest}));
             }
             Err(e) => {
-                failed = todo.len() - entries.len();
-                log::error!(
-                    "sending {rel} failed ({e}); aborting batch, {failed} file(s) left for the next pass"
-                );
+                failed += 1;
+                if !stopped {
+                    log::error!(
+                        "sending {} failed ({e}); aborting batch, unsent files are left for the next pass",
+                        f.rel
+                    );
+                } else {
+                    log::error!("sending {} failed ({e})", f.rel);
+                }
+                stopped = true;
                 Event::new("file_failed")
                     .module(module)
                     .per_file()
-                    .field("path", rel.as_str())
+                    .field("path", f.rel)
                     .field("reason", e)
                     .emit();
-                break;
             }
         }
+    }
+    if stopped {
+        // Failed ones plus those never started.
+        failed += next.count();
     }
     if entries.is_empty() {
         return 0;

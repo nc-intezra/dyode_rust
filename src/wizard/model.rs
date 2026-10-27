@@ -374,6 +374,14 @@ pub fn advanced(ty: ModType) -> Vec<Field> {
     match ty {
         ModType::Folder => vec![
             f(
+                "parallel_files",
+                "Files at once (input box)",
+                "How many files of a batch are sent at the same time, each as its own lidi transfer. More than 1 helps with many files on a multi-core box with several lidi ports. 1 to 16.",
+                "1",
+                Int,
+                check_parallel,
+            ),
+            f(
                 "settle",
                 "Settle time, s (input box)",
                 "A file must stay unchanged this long before it is sent, so half-written files are not.",
@@ -699,6 +707,12 @@ fn check_unit(s: &str) -> Result<(), String> {
     match s.parse::<u8>() {
         Ok(_) => Ok(()),
         _ => Err("a unit id, 0 to 255".into()),
+    }
+}
+fn check_parallel(s: &str) -> Result<(), String> {
+    match s.parse::<u8>() {
+        Ok(1..=16) => Ok(()),
+        _ => Err("1 to 16".into()),
     }
 }
 fn check_copies(s: &str) -> Result<(), String> {

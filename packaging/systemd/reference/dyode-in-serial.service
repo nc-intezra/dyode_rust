@@ -1,0 +1,25 @@
+# Reference only: install.sh and 'dyode setup' write the real
+# /etc/systemd/system/dyode-in.service from your config.yaml (its diode
+# NIC), with: dyode systemd-unit --side in --serial --workdir /etc/dyode --binary /usr/local/bin/dyode
+# This one is for config.example.yaml (input NIC eth0, output NIC eth1).
+[Unit]
+Description=DYODE input (sending) side (serial-in)
+After=network-online.target
+Wants=network-online.target
+# A diode may sit behind a network that takes long to come back: never give up.
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=/etc/dyode
+ExecStart=/usr/local/bin/dyode serial-in --config /etc/dyode/config.yaml
+Restart=always
+RestartSec=5
+StandardInput=null
+# Creates /var/log/dyode-transfer with the right mode before start.
+LogsDirectory=dyode-transfer
+LogsDirectoryMode=0750
+# root is needed for the static ARP entry.
+User=root
+
+[Install]
+WantedBy=multi-user.target

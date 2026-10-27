@@ -155,6 +155,74 @@ pub fn systemd_unit_text(
     l.join("\n")
 }
 
+/// What is wrong between an installed unit and config.yaml, in plain
+/// words.  `unit` is the unit file's text; `serial` says DYODE v2.
+pub fn check_unit(
+    unit: &str,
+    side: Side,
+    cfg: &crate::config::Config,
+    serial: bool,
+) -> Vec<String> {
+    let mut w = Vec::new();
+    let name = unit_name(side);
+    let bound: Option<&str> = unit
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("BindsTo="))
+        .map(str::trim);
+    let exec = unit
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ExecStart="))
+        .unwrap_or("");
+    let words: Vec<&str> = exec.split_whitespace().collect();
+    let command = words.get(1).copied().unwrap_or("");
+    let want_cmd = match (side, serial) {
+        (Side::In, false) => "in",
+        (Side::Out, false) => "out",
+        (Side::In, true) => "serial-in",
+        (Side::Out, true) => "serial-out",
+    };
+    if !command.is_empty() && command != want_cmd {
+        w.push(format!(
+            "{name} runs 'dyode {command}', but this is the {want_cmd} side"
+        ));
+    }
+    if !serial {
+        let iface = match side {
+            Side::In => &cfg.network.in_interface,
+            Side::Out => &cfg.network.out_interface,
+        };
+        let want = device_unit(iface);
+        match bound {
+            Some(b) if b == want => {}
+            Some(b) => {
+                let shown = b
+                    .strip_prefix("sys-subsystem-net-devices-")
+                    .and_then(|x| x.strip_suffix(".device"))
+                    .unwrap_or(b);
+                w.push(format!(
+                    "{name} waits for the network card {shown}, but config.yaml says {iface}: \
+                     it will never start (or start on the wrong card).  Regenerate it: \
+                     sudo dyode systemd-unit --side {} > /etc/systemd/system/{name}, or re-run install.sh",
+                    side.as_str()
+                ));
+            }
+            None => w.push(format!("{name} is not tied to the diode card {iface} (no BindsTo=): it may start before the card is up")),
+        }
+    }
+    if let Some(i) = words.iter().position(|w| *w == "--config" || *w == "-c") {
+        if let Some(p) = words.get(i + 1) {
+            let unit_cfg = std::fs::canonicalize(p).ok();
+            let this = std::fs::canonicalize(&cfg.path).ok();
+            if unit_cfg.is_some() && this.is_some() && unit_cfg != this {
+                w.push(format!("{name} uses {p}, not {}", cfg.path.display()));
+            } else if unit_cfg.is_none() {
+                w.push(format!("{name} uses {p}, which does not exist"));
+            }
+        }
+    }
+    w
+}
+
 /// Copy a key file after checking it, readable by root only.
 pub fn install_key_copy(source: &Path, dest: &Path) -> Result<(), String> {
     crate::auth::read_key_file(source).map_err(|e| e.to_string())?;
@@ -217,6 +285,69 @@ pub fn firewall_rules(cfg: &crate::config::Config) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// packaging/systemd/reference/ must stay what the code generates.
+    #[test]
+    fn reference_units_match_the_generator() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for (file, side, cmd, iface) in [
+            ("dyode-in.service", Side::In, "in", Some("eth0")),
+            ("dyode-out.service", Side::Out, "out", Some("eth1")),
+            ("dyode-in-serial.service", Side::In, "serial-in", None),
+            ("dyode-out-serial.service", Side::Out, "serial-out", None),
+        ] {
+            let text =
+                fs::read_to_string(root.join("packaging/systemd/reference").join(file)).unwrap();
+            let body: String = text
+                .lines()
+                .skip_while(|l| l.starts_with("# "))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            let want = systemd_unit_text(
+                side,
+                cmd,
+                Path::new("/etc/dyode"),
+                Path::new("/usr/local/bin/dyode"),
+                iface,
+            );
+            assert_eq!(
+                body, want,
+                "{file} is stale: regenerate it with dyode systemd-unit"
+            );
+        }
+    }
+
+    #[test]
+    fn unit_checks() {
+        let d = crate::testutil::TempDir::new();
+        let cfg_path = d.path().join("config.yaml");
+        fs::write(
+            &cfg_path,
+            "dyode_out: {interface: enp2s0}\nmodules:\n  a: {type: folder, in: /a, out: /b}\n",
+        )
+        .unwrap();
+        let cfg = crate::config::load(&cfg_path).unwrap();
+        let unit = |iface: Option<&str>, cmd: &str| {
+            systemd_unit_text(
+                Side::Out,
+                cmd,
+                d.path(),
+                Path::new("/usr/local/bin/dyode"),
+                iface,
+            )
+        };
+        assert!(check_unit(&unit(Some("enp2s0"), "out"), Side::Out, &cfg, false).is_empty());
+        let w = check_unit(&unit(Some("eth1"), "out"), Side::Out, &cfg, false);
+        assert!(
+            w.len() == 1 && w[0].contains("eth1") && w[0].contains("enp2s0"),
+            "{w:?}"
+        );
+        let w = check_unit(&unit(None, "out"), Side::Out, &cfg, false);
+        assert!(w[0].contains("not tied"), "{w:?}");
+        let w = check_unit(&unit(None, "serial-out"), Side::Out, &cfg, false);
+        assert!(w.iter().any(|l| l.contains("serial-out")), "{w:?}");
+        assert!(check_unit(&unit(None, "serial-out"), Side::Out, &cfg, true).is_empty());
+    }
 
     #[test]
     fn escape() {

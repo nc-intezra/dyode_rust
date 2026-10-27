@@ -1354,10 +1354,10 @@ mod tests {
     // welcome, v1, input, new, name, eth0, ip, peer info, peer ip, peer mac,
     // peer iface, ports (suggested), rate, add folder (type, name, in, out),
     // done, key: create, review: write, done.
-    // The folder's advanced screen: settle changed to 5, then Done.
+    // The folder's advanced screen: settle (second option) changed to 5, then Done.
     const FULL: &str = "enter enter enter enter ctrl-u 'Line 3' enter enter enter enter enter \
                         'b8:27:eb:b1:ff:ab' enter enter enter enter enter enter enter enter enter \
-                        down enter '5' enter enter \
+                        down down enter '5' enter enter \
                         enter enter enter enter";
 
     #[test]
