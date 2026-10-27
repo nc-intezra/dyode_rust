@@ -12,7 +12,8 @@
 #                      fetched.  The whole bundle is checked against
 #                      SHA256SUMS before anything is changed.
 #   --online           apt for OS packages; cargo may build the binary
-#                      (default: offline when this folder is a bundle)
+#                      (neither given: asked on an interactive terminal,
+#                      else offline when this folder is a bundle)
 #   --with LIST        also install file-sharing services for the received
 #                      files: ssh, nfs, smb (comma-separated).  Packages only:
 #                      configure the shares yourself (never share *.incoming).
@@ -28,6 +29,13 @@
 #   --no-tuning        do not install the kernel settings
 #   --firewall-only    only (re)apply the firewall rules from config.yaml
 #   --tuning-only      only (re)apply the kernel settings
+#   --no-wizard        do not run the guided setup (dyode setup), which
+#                      otherwise runs on every interactive install; an
+#                      existing config.yaml is then kept, or one is made
+#                      from config.example.yaml
+#   --wizard           run it, and say so when the terminal cannot
+#   --import-config F  start the guided setup from this config.yaml (e.g. the
+#                      other box's)
 #   --no-enable        write the systemd units but do not enable/start them
 #   --dry-run          say what would be done, change nothing
 #
@@ -42,6 +50,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 MODE="" WITH="" SKIP_OS=0
 SIDE="" VARIANT="v1" BINARY="" PREFIX="/usr/local/bin" ETC="${DYODE_ETC_DIR:-/etc/dyode}"
 NO_FIREWALL=0 NO_TUNING=0 FIREWALL_ONLY=0 TUNING_ONLY=0 NO_ENABLE=0 DRY_RUN=0
+WIZARD=auto IMPORT_CFG=""
 SYS_ETC="${DYODE_ETC:-/etc}"
 
 say()  { printf '%s\n' "$*"; }
@@ -62,6 +71,9 @@ while [ $# -gt 0 ]; do
     --firewall-only) FIREWALL_ONLY=1; shift ;;
     --tuning-only) TUNING_ONLY=1; shift ;;
     --no-enable) NO_ENABLE=1; shift ;;
+    --wizard) WIZARD=yes; shift ;;
+    --no-wizard) WIZARD=no; shift ;;
+    --import-config) IMPORT_CFG="${2:-}"; WIZARD=yes; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --offline) MODE=offline; shift ;;
     --online) MODE=online; shift ;;
@@ -109,8 +121,44 @@ SUPPORTED="Ubuntu 24.04 and 26.04, Debian 12 and 13 / Raspberry Pi OS bookworm a
 is_bundle() { [ -f "$ROOT/SHA256SUMS" ] && [ -d "$ROOT/bin" ]; }
 debs_present() { [ -n "$OS_ID" ] && ls "$DEB_DIR"/*.deb >/dev/null 2>&1; }
 
+interactive() { [ -t 0 ] && [ -t 1 ]; }
+
+# Offline or online, asked before anything is installed: in a dialog box
+# by the dyode binary when one is at hand (the bundle's, a local build),
+# else as a plain question.
+ask_mode() {
+  local def=online bin="" c ans rc=0
+  is_bundle && def=offline
+  for c in "$BINARY" "$BUNDLE_BIN" "$ROOT/target/release/dyode" "$PREFIX/dyode"; do
+    if [ -n "$c" ] && [ -x "$c" ] && "$c" version >/dev/null 2>&1; then bin="$c"; break; fi
+  done
+  if [ -n "$bin" ]; then
+    ans="$(mktemp)"
+    # shellcheck disable=SC2046
+    "$bin" setup --ask-install-mode "$ans" --default "$def" $(is_bundle && echo --bundle) || rc=$?
+    MODE="$(cat "$ans" 2>/dev/null || true)"; rm -f "$ans"
+    [ "$rc" -eq 3 ] && die "installation cancelled; nothing was changed"
+    case "$MODE" in offline|online) return 0 ;; esac
+  fi
+  local hint="this folder is not an offline bundle"
+  is_bundle && hint="this folder is an offline bundle"
+  while :; do
+    printf 'Install offline (only this folder) or online (apt, cargo)?  [%s] (%s): ' "$def" "$hint"
+    read -r ans || die "no answer; nothing was changed"
+    case "${ans:-$def}" in
+      offline|off|o|1) MODE=offline; return 0 ;;
+      online|on|n|2) MODE=online; return 0 ;;
+      q|quit) die "installation cancelled; nothing was changed" ;;
+    esac
+  done
+}
+
 if [ -z "$MODE" ]; then
-  if is_bundle; then MODE=offline; else MODE=online; fi
+  if interactive && [ "$FIREWALL_ONLY" -eq 0 ] && [ "$TUNING_ONLY" -eq 0 ]; then
+    ask_mode
+  elif is_bundle; then MODE=offline
+  else MODE=online
+  fi
 fi
 
 # -------------------------------------------------------- OS packages
@@ -346,12 +394,31 @@ say "   $PREFIX/dyode ($("$DYODE" version 2>/dev/null || echo '?'))"
 
 step "configuration in $ETC"
 run mkdir -p "$ETC"
-if [ -f "$ETC/config.yaml" ]; then
+run_wizard() {
+  [ "$WIZARD" = no ] && return 1
+  if ! interactive; then
+    [ "$WIZARD" = yes ] && warn "--wizard needs an interactive terminal; skipping the guided setup"
+    return 1
+  fi
+  local args=(setup --side "$SIDE" --variant "$VARIANT" --etc "$ETC")
+  [ -n "$IMPORT_CFG" ] && args+=(--import-config "$IMPORT_CFG")
+  [ "$DRY_RUN" -eq 1 ] && args+=(--dry-run)
+  # The installer writes the systemd unit itself, from what setup wrote.
+  if DYODE_INSTALLER=1 "$DYODE" "${args[@]}"; then
+    return 0
+  fi
+  warn "guided setup left before writing; continuing without it"
+  return 1
+}
+if run_wizard; then
+  if [ "$DRY_RUN" -eq 1 ]; then say "   guided setup done (dry run: nothing written)"; else say "   $ETC/config.yaml written by the guided setup"; fi
+elif [ -f "$ETC/config.yaml" ]; then
   say "   keeping $ETC/config.yaml"
 else
   run install -m 0640 "$ROOT/config.example.yaml" "$ETC/config.yaml"
   say "   wrote $ETC/config.yaml from config.example.yaml: EDIT IT (addresses, MACs, modules),"
-  say "   then copy the SAME file to the other box.  'dyode interfaces' lists NICs and MACs."
+  say "   then copy the SAME file to the other box.  'dyode interfaces' lists NICs and MACs,"
+  say "   or run the guided setup:  sudo dyode setup --side $SIDE"
 fi
 if [ "$VARIANT" = v1 ] && [ ! -f "$ETC/dyode.key" ]; then
   say "   no $ETC/dyode.key yet.  On ONE box:  sudo dyode new-key -c $ETC/config.yaml"
@@ -362,7 +429,11 @@ step "systemd"
 case "$VARIANT/$SIDE" in v1/in) CMD=in ;; v1/out) CMD=out ;; v2/in) CMD=serial-in ;; v2/out) CMD=serial-out ;; esac
 UNIT="$(mktemp)"
 SERIAL_FLAG=""; [ "$VARIANT" = v2 ] && SERIAL_FLAG="--serial"
-CFG_FOR_UNIT="$ETC/config.yaml"; [ -f "$CFG_FOR_UNIT" ] || CFG_FOR_UNIT="$ROOT/config.example.yaml"
+CFG_FOR_UNIT="$ETC/config.yaml"
+if [ ! -f "$CFG_FOR_UNIT" ]; then
+  CFG_FOR_UNIT="$ROOT/config.example.yaml"
+  [ "$VARIANT" = v1 ] && warn "the unit waits for the example config's NIC; run 'sudo dyode setup' or re-run this installer once config.yaml is right"
+fi
 # shellcheck disable=SC2086
 "$DYODE" systemd-unit --side "$SIDE" $SERIAL_FLAG --workdir "$ETC" --binary "$PREFIX/dyode" -c "$CFG_FOR_UNIT" | sed '1d' > "$UNIT"
 if [ "$DRY_RUN" -eq 1 ]; then

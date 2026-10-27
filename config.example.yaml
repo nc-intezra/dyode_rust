@@ -30,7 +30,9 @@ dyode_out:
 lidi:
   ports: [5000]            # UDP ports through the diode; one RaptorQ
                            # encode/decode thread per port.  More ports =
-                           # more throughput on multi-core boxes.
+                           # more throughput on multi-core boxes: about one
+                           # per CPU core minus one, up to 4, sized for the
+                           # SMALLER box ('dyode check' suggests a list).
   # mtu: 1500              # of the diode link; 9000 for jumbo frames
   # block: 220000          # RaptorQ block size, bytes
   # repair: 5              # repair packets, % of each block (lidi adds 2
@@ -39,7 +41,8 @@ lidi:
                            # transfer in flight with it.  Raise on a lossy
                            # link.
   # heartbeat: 10          # seconds; the output box warns when it stops
-  # max_clients: auto      # simultaneous transfers (default: modules + 2)
+  # max_clients: auto      # simultaneous transfers (default: one per module,
+                           # parallel_files per folder module, plus 2)
   # mode: mmsg             # native | msg | mmsg (sendmmsg/recvmmsg)
   # reset_timeout: 2       # receiver: decoder reset after this much silence
   # abort_timeout: 120     # receiver: drop a transfer idle this long (0 = never)
@@ -77,6 +80,10 @@ modules:
     # optional: settle: 2       seconds a file must be unchanged before sending
     # optional: rescan: 30      seconds between full rescans
     # optional: bitrate: 100    Mbit/s cap for this module (default: none)
+    # optional: parallel_files: 1
+    #                           files of a batch sent at once, each its own
+    #                           lidi transfer (1 to 16).  Raise it with
+    #                           several lidi ports, for many files.
     # optional: keep_sent_hours: 24
     #                           sent files are moved to .dyode_sent and kept
     #                           this long instead of being deleted, because a

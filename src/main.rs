@@ -20,6 +20,10 @@ Running (both boxes read the same config.yaml):
     --log-level LEVEL      DEBUG, INFO (default), WARNING or ERROR
 
 Setting up:
+  setup         guided setup in dialog boxes (plain questions when not on a
+                terminal): writes config.yaml, the key and the systemd unit.
+                [--side in|out] [--variant v1|v2] [--etc DIR] [--plain]
+                [--import-config FILE] [--dry-run] [--no-unit]
   new-key       create the shared message key (once, on ONE box; copy it to
                 the other):  [-c config.yaml] [--key-file FILE]
   check         validate config.yaml and the key:  [-c FILE] [--side in|out]
@@ -200,13 +204,16 @@ fn cmd_check(mut args: Args) {
             m.name
         );
     }
+    let mut warnings = unit_warnings(&cfg, side.as_deref(), serial);
     if serial {
         println!(
             "  serial: {} @ {} baud (v2: no key needed)",
             cfg.serial.device, cfg.serial.baudrate
         );
+        print_warnings(&warnings);
         return;
     }
+    warnings.extend(throughput_hints(&cfg));
     match auth::load_key(&cfg.auth) {
         Ok(Some(_)) => println!("  key: {} OK", cfg.auth.key_file.display()),
         Ok(None) => println!("  key: none (auth.required is false: NOT authenticated)"),
@@ -220,10 +227,78 @@ fn cmd_check(mut args: Args) {
         exit(1);
     }
     if side.as_deref() == Some("in") && cfg.network.out_mac.is_none() {
-        println!(
-            "  warning: dyode_out.mac is not set: the input box cannot reach the output box through a diode"
+        warnings.insert(
+            0,
+            "dyode_out.mac is not set: the input box cannot reach the output box through a diode"
+                .into(),
         );
     }
+    print_warnings(&warnings);
+}
+
+fn print_warnings(w: &[String]) {
+    for l in w {
+        println!("  warning: {l}");
+    }
+}
+
+/// Compare the installed systemd unit(s) with config.yaml: the side asked
+/// for, or every DYODE unit present.
+fn unit_warnings(cfg: &config::Config, side: Option<&str>, serial: bool) -> Vec<String> {
+    let dir = PathBuf::from(
+        std::env::var("DYODE_SYSTEMD_DIR").unwrap_or_else(|_| "/etc/systemd/system".into()),
+    );
+    let sides: Vec<Side> = match side {
+        Some("in") => vec![Side::In],
+        Some("out") => vec![Side::Out],
+        _ => vec![Side::In, Side::Out],
+    };
+    let mut w = Vec::new();
+    for s in sides {
+        let path = dir.join(setup::unit_name(s));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let found = setup::check_unit(&text, s, cfg, serial);
+                if found.is_empty() {
+                    println!("  unit: {} matches", path.display());
+                }
+                w.extend(found);
+            }
+            Err(_) if side.is_some() => w.push(format!(
+                "{} is not installed: run install.sh (or dyode setup) to create it",
+                path.display()
+            )),
+            Err(_) => {}
+        }
+    }
+    w
+}
+
+/// Suggestions for using the box's cores, never errors.
+fn throughput_hints(cfg: &config::Config) -> Vec<String> {
+    let mut w = Vec::new();
+    let cpus = std::thread::available_parallelism().map_or(1, usize::from);
+    let suggested = dyode::wizard::model::suggested_ports(cpus);
+    if cfg.lidi.ports.len() < suggested {
+        let first = cfg.lidi.ports.first().copied().unwrap_or(5000);
+        w.push(format!(
+            "lidi uses {} port(s) on a {cpus}-CPU box: one RaptorQ thread per port.  For more throughput set \
+             lidi.ports: [{}] -- in the config of BOTH boxes, and only if the other box has the cores too",
+            cfg.lidi.ports.len(),
+            dyode::wizard::model::port_list(first, suggested)
+        ));
+    }
+    if let Some(m) = cfg.lidi.max_clients {
+        let need = cfg.concurrent_transfers();
+        if m < need {
+            w.push(format!(
+                "lidi.max_clients is {m}, but the modules can have {need} transfers in flight (parallel_files \
+                 included): transfers will wait for each other.  Remove max_clients to get {} automatically",
+                need + 2
+            ));
+        }
+    }
+    w
 }
 
 fn cmd_unit(mut args: Args) {
@@ -273,6 +348,180 @@ fn cmd_unit(mut args: Args) {
             iface.as_deref()
         )
     );
+}
+
+/// Can we create or change files in `dir` (or where it would be created)?
+fn writable(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let mut p = dir;
+    while !p.exists() {
+        match p.parent() {
+            Some(q) => p = q,
+            None => return false,
+        }
+    }
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: a valid C string.
+    unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+}
+
+fn cmd_setup(mut args: Args) {
+    use dyode::tui;
+    use dyode::wizard::{self, model, ui};
+    let plain = args.flag(&["--plain"]);
+    let dry_run = args.flag(&["--dry-run"]);
+    let no_unit = args.flag(&["--no-unit"]);
+    let etc = PathBuf::from(
+        args.value(&["--etc"])
+            .unwrap_or_else(|| "/etc/dyode".into()),
+    );
+    let side = match args.value(&["--side"]).as_deref() {
+        None => None,
+        Some("in") => Some(Side::In),
+        Some("out") => Some(Side::Out),
+        Some(o) => die_usage(&format!("--side must be in or out, not {o:?}")),
+    };
+    let variant = match args.value(&["--variant"]).as_deref() {
+        None => None,
+        Some("v1") => Some(model::Variant::V1),
+        Some("v2") => Some(model::Variant::V2),
+        Some(o) => die_usage(&format!("--variant must be v1 or v2, not {o:?}")),
+    };
+    let import = args.value(&["--import-config"]).map(PathBuf::from);
+    let preset = wizard::Preset {
+        side,
+        variant,
+        import,
+    };
+    // Used by install.sh: ask offline/online before anything is installed,
+    // in the same dialog look, and write the answer to a file.
+    let ask_mode = args.value(&["--ask-install-mode"]);
+    let mode_default = args.value(&["--default"]);
+    let bundle = args.flag(&["--bundle"]);
+    // Hidden: run a key script against a fake box and save every screen.
+    let demo = args.value(&["--demo-keys"]);
+    let demo_out = args.value(&["--demo-out"]);
+    let demo_size = args.value(&["--demo-size"]);
+    args.done();
+
+    if let Some(answer) = ask_mode {
+        let offline_default = mode_default.as_deref() != Some("online");
+        let script = demo.clone();
+        let res = match (script, plain) {
+            (Some(keys), _) => {
+                let mut dui = ui::DialogUi::new(tui::Virtual::new(80, 24, tui::parse_keys(&keys)));
+                let r = wizard::ask_install_mode(&mut dui, bundle, offline_default);
+                if let Some(out) = &demo_out {
+                    let body: String = dui
+                        .backend
+                        .shots
+                        .iter()
+                        .map(|(_, f)| format!("{f}\n"))
+                        .collect();
+                    let _ = std::fs::write(out, body);
+                }
+                r
+            }
+            (None, false) if tui::Terminal::open().is_ok() => {
+                let t = tui::Terminal::open().expect("terminal");
+                wizard::ask_install_mode(&mut ui::DialogUi::new(t), bundle, offline_default)
+            }
+            _ => {
+                let stdin = std::io::stdin();
+                wizard::ask_install_mode(
+                    &mut ui::PlainUi::new(stdin.lock(), std::io::stderr()),
+                    bundle,
+                    offline_default,
+                )
+            }
+        };
+        match res {
+            Some(mode) => {
+                if let Err(e) = std::fs::write(&answer, format!("{mode}\n")) {
+                    eprintln!("cannot write {answer}: {e}");
+                    exit(1);
+                }
+            }
+            None => exit(3),
+        }
+        return;
+    }
+
+    if let Some(script) = demo {
+        let (w, h) = demo_size
+            .and_then(|s| {
+                s.split_once('x')
+                    .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
+            })
+            .unwrap_or((80, 24));
+        let mut env = wizard::demo_env(etc);
+        env.dry_run = true;
+        env.write_unit = !no_unit;
+        let mut dui = ui::DialogUi::new(tui::Virtual::new(w, h, tui::parse_keys(&script)));
+        let out = wizard::run(&mut dui, &env, preset);
+        let frames = &dui.backend.shots;
+        let path = demo_out.unwrap_or_else(|| "setup-demo.html".into());
+        let body: String = frames.iter().map(|(_, f)| format!("{f}\n")).collect();
+        std::fs::write(&path, body).unwrap_or_else(|e| {
+            eprintln!("cannot write {path}: {e}");
+            exit(1)
+        });
+        println!(
+            "{} screens to {path} ({})",
+            frames.len(),
+            if matches!(out, wizard::Outcome::Quit) {
+                "ended before writing"
+            } else {
+                "reached the end"
+            }
+        );
+        return;
+    }
+
+    if !dry_run && !writable(&etc) {
+        eprintln!(
+            "dyode setup writes to {} and /etc/systemd: run it with sudo (or try --dry-run).",
+            etc.display()
+        );
+        exit(1);
+    }
+    let mut env = model::Env::real(etc, dry_run);
+    if no_unit {
+        env.write_unit = false;
+    }
+    let term = if plain {
+        None
+    } else {
+        tui::Terminal::open().ok()
+    };
+    let out = match term {
+        Some(t) => wizard::run(&mut ui::DialogUi::new(t), &env, preset),
+        None => {
+            let stdin = std::io::stdin();
+            wizard::run(
+                &mut ui::PlainUi::new(stdin.lock(), std::io::stdout()),
+                &env,
+                preset,
+            )
+        }
+    };
+    match out {
+        wizard::Outcome::Quit => {
+            eprintln!("setup left; nothing was written.");
+            exit(3);
+        }
+        wizard::Outcome::Written { done, next, .. } => {
+            for l in done {
+                println!("{l}");
+            }
+            println!("\nNext:");
+            for l in next {
+                println!("  {l}");
+            }
+        }
+    }
 }
 
 fn cmd_interfaces(mut args: Args) {
@@ -373,6 +622,7 @@ fn main() {
             print!("{}", transport::lidi_toml(&load(p)));
         }
         "interfaces" => cmd_interfaces(args),
+        "setup" => cmd_setup(args),
         "firewall-rules" => {
             let p = args.value(&["-c", "--config"]);
             let iface_only = args.flag(&["--interface"]);

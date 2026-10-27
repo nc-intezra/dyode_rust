@@ -158,3 +158,75 @@ fn folder_and_modbus_through_lidi() {
     });
     assert_eq!(mirror.handle_pdu(&[3, 0, 0, 0, 1]), vec![3, 2, 0, 11]);
 }
+
+/// parallel_files: several files of one batch in flight at once, over two
+/// lidi ports, all arriving intact and all retired.
+#[test]
+fn folder_parallel_files_through_lidi() {
+    let d = TempDir::new();
+    let port = 20000 + (dyode::auth::random_u32() % 20000) as u16;
+    let yaml = format!(
+        "dyode_in: {{ip: 127.0.0.1, interface: lo}}\n\
+         dyode_out: {{ip: 127.0.0.1, interface: lo}}\n\
+         lidi: {{ports: [{port}, {p2}], heartbeat: 1}}\n\
+         logging: {{dir: ''}}\n\
+         modules:\n  files:\n    type: folder\n    in: {d}/in\n    out: {d}/out\n    parallel_files: 4\n",
+        p2 = port + 1,
+        d = d.path().display()
+    );
+    let cfg = config::parse(&yaml, Path::new("config.yaml"), d.path()).unwrap();
+    assert_eq!(cfg.max_clients(), 6, "4 files + summary + heartbeat");
+    let key = Some(vec![7u8; 32]);
+    let ModuleKind::Folder(fc) = &cfg.modules[0].kind else {
+        panic!()
+    };
+    let fin = Arc::new(folder::FolderInbound::new(&cfg.modules[0], fc).unwrap());
+    let mut lc = Lifecycle::new();
+    lc.register(&cfg.modules[0], key.clone(), fin);
+    let receiver: &'static transport::LidiReceiver =
+        Box::leak(Box::new(transport::new_receiver(&cfg, lc).unwrap()));
+    std::thread::spawn(move || {
+        std::thread::scope(|s| {
+            if let Err(e) = receiver.start(s) {
+                panic!("lidi receiver: {e}");
+            }
+            loop {
+                std::thread::park();
+            }
+        })
+    });
+    let sender: &'static transport::LidiSender =
+        Box::leak(Box::new(transport::new_sender(&cfg).unwrap()));
+    std::thread::spawn(move || {
+        std::thread::scope(|s| {
+            if let Err(e) = sender.start(s) {
+                panic!("lidi sender: {e}");
+            }
+            loop {
+                std::thread::park();
+            }
+        })
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    let uplink = Arc::new(Uplink::new(sender, &cfg));
+    let flink = ModuleLink::new(uplink, &cfg.modules[0], key, None);
+
+    std::fs::create_dir_all(&fc.input).unwrap();
+    let mut want = Vec::new();
+    for n in 0..9u32 {
+        let data: Vec<u8> = (0..300_000u32)
+            .map(|i| ((i * 13 + n * 31) % 251) as u8)
+            .collect();
+        std::fs::write(fc.input.join(format!("f{n}.bin")), &data).unwrap();
+        want.push((format!("f{n}.bin"), data));
+    }
+    let (ready, _) = dyode::fsafe::scan_ready_files(&fc.input, 0.0);
+    assert_eq!(folder::send_batch("files", fc, &flink, &ready), 9);
+    for (name, data) in &want {
+        let out = fc.output.join(name);
+        wait_for(name, 20, || {
+            std::fs::read(&out).map(|b| &b == data).unwrap_or(false)
+        });
+        assert!(fc.input.join(".dyode_sent").join(name).exists());
+    }
+}

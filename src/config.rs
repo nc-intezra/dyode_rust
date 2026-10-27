@@ -182,6 +182,8 @@ pub struct FolderConfig {
     pub batch_timeout: f64,
     /// Where incoming files are written before verification.
     pub staging: Option<PathBuf>,
+    /// Files of one batch in flight at once (input side), 1 to 16.
+    pub parallel_files: u32,
     /// Keys that only meant something to udpcast.
     pub ignored: Vec<String>,
 }
@@ -420,11 +422,24 @@ impl Config {
             .filter(move |m| m.kind.type_name() == ty)
     }
 
-    /// lidi max_clients: configured, or one per module plus two.
+    /// Transfers the modules may have in flight at once: one per module,
+    /// plus the extra files of folder modules with `parallel_files`.
+    pub fn concurrent_transfers(&self) -> u32 {
+        self.modules
+            .iter()
+            .map(|m| match &m.kind {
+                ModuleKind::Folder(f) => f.parallel_files,
+                _ => 1,
+            })
+            .sum()
+    }
+
+    /// lidi max_clients: configured, or what the modules need plus two
+    /// (a batch summary and a heartbeat may overlap the transfers).
     pub fn max_clients(&self) -> u32 {
         self.lidi
             .max_clients
-            .unwrap_or(self.modules.len() as u32 + 2)
+            .unwrap_or(self.concurrent_transfers() + 2)
     }
 }
 
@@ -1017,6 +1032,9 @@ fn normalize_lidi(raw: Option<&Value>) -> Result<LidiConfig> {
 
 const UDPCAST_ONLY: [&str; 4] = ["fec", "autostart", "start_timeout", "file_gap"];
 
+/// The most files one folder module sends at once.
+pub const MAX_PARALLEL_FILES: i64 = 16;
+
 fn normalize_module(name: &str, index: u16, props: &Value) -> Result<Module> {
     let Value::Mapping(p) = props else {
         bail!("module {name:?}: properties must be a mapping");
@@ -1089,6 +1107,15 @@ fn normalize_module(name: &str, index: u16, props: &Value) -> Result<Module> {
                     true,
                 )?,
                 staging,
+                parallel_files: match key(p, "parallel_files") {
+                    None => 1,
+                    Some(v) => match as_int_trunc(v) {
+                        Some(n) if (1..=MAX_PARALLEL_FILES).contains(&n) => n as u32,
+                        _ => bail!(
+                            "module {name:?}: 'parallel_files' must be 1 to {MAX_PARALLEL_FILES}, got {v:?}"
+                        ),
+                    },
+                },
                 ignored: UDPCAST_ONLY
                     .iter()
                     .filter(|k| key(p, k).is_some())
