@@ -98,6 +98,62 @@ pub fn demo_env(etc: PathBuf) -> Env {
     }
 }
 
+/// The installer's first question: where packages and the binary come
+/// from.  Some("offline" | "online"), or None when the person leaves.
+pub fn ask_install_mode<U: Ui>(
+    ui: &mut U,
+    bundle: bool,
+    offline_default: bool,
+) -> Option<&'static str> {
+    let opts = [
+        if bundle {
+            Opt::new(
+                "Offline",
+                "only the files in this folder; nothing is downloaded",
+            )
+        } else {
+            Opt::new("Offline", "this folder is not an offline bundle").warn(true)
+        },
+        Opt::new(
+            "Online",
+            "apt for OS packages; cargo builds dyode if needed",
+        ),
+    ];
+    let body = vec![
+        if bundle {
+            "This folder is an offline bundle: it carries the dyode binaries and the OS packages for every supported system. \
+             Offline checks every file against SHA256SUMS first."
+                .to_string()
+        } else {
+            "This folder is not an offline bundle, so an offline install only works if nothing needs fetching \
+             (a local build, no missing packages)."
+                .to_string()
+        },
+        "Online needs this box to reach the Debian/Ubuntu mirrors. Boxes on the OT side usually cannot.".into(),
+        String::new(),
+        "The guided setup of DYODE itself follows once the software is installed.".into(),
+    ];
+    let def = usize::from(!offline_default);
+    loop {
+        match ui.choose("How should DYODE be installed?", &body, &opts, def) {
+            Nav::Next(0) => {
+                ui.finish();
+                return Some("offline");
+            }
+            Nav::Next(_) => {
+                ui.finish();
+                return Some("online");
+            }
+            // The first screen: there is nothing to go back to.
+            Nav::Back => continue,
+            Nav::Quit => {
+                ui.finish();
+                return None;
+            }
+        }
+    }
+}
+
 /// Run the wizard to the end (written) or until the person leaves.
 pub fn run<U: Ui>(ui: &mut U, env: &Env, preset: Preset) -> Outcome {
     let mut d = Draft::new();
@@ -878,6 +934,7 @@ impl<U: Ui> Wizard<'_, U> {
         let m = &self.d.modules[i];
         let opts = [
             Opt::new("Change its settings", m.summary()),
+            Opt::new("Advanced options", "timings, caps, formats"),
             Opt::new("Rename it", m.name.clone()),
             Opt::new("Move it up", "changes its endpoint number"),
         ];
@@ -892,7 +949,11 @@ impl<U: Ui> Wizard<'_, U> {
                 Nav::Quit => Nav::Quit,
                 _ => Nav::Next(()),
             },
-            Nav::Next(1) => {
+            Nav::Next(1) => match self.advanced(i) {
+                Nav::Quit => Nav::Quit,
+                _ => Nav::Next(()),
+            },
+            Nav::Next(2) => {
                 let taken: Vec<String> = self
                     .d
                     .modules
@@ -936,35 +997,102 @@ impl<U: Ui> Wizard<'_, U> {
         }
     }
 
-    /// One screen per field; Back on the first returns Back.
+    /// One screen per field, then the advanced options; Back on the first
+    /// field returns Back.
     fn edit_fields(&mut self, i: usize) -> Nav<()> {
         let ty = self.d.modules[i].ty;
         let fields = model::fields(ty);
         let mut k = 0;
-        while k < fields.len() {
-            let f = &fields[k];
+        loop {
+            while k < fields.len() {
+                let f = &fields[k];
+                let m = &self.d.modules[i];
+                let cur = m.get(f.key);
+                let title = format!("{} ({}) {}/{}", m.name, ty.name(), k + 1, fields.len());
+                let check = f.check;
+                match self.ui.text(&title, &p(f.help), f.label, &cur, &check) {
+                    Nav::Next(v) => {
+                        self.d.modules[i].set(f.key, &v, f.kind);
+                        k += 1;
+                    }
+                    Nav::Back if k == 0 => return Nav::Back,
+                    Nav::Back => k -= 1,
+                    Nav::Quit => return Nav::Quit,
+                }
+            }
+            match self.advanced(i) {
+                Nav::Next(()) => {}
+                Nav::Back => {
+                    k = fields.len() - 1;
+                    continue;
+                }
+                Nav::Quit => return Nav::Quit,
+            }
+            // A module DYODE would refuse is caught here, not at the end.
+            let mut one = self.d.clone();
+            one.modules = vec![self.d.modules[i].clone()];
+            match one.validate(self.env) {
+                Ok(_) => return Nav::Next(()),
+                Err(e) => {
+                    let _ = self.ui.notice("This module needs a fix", &[e]);
+                    k = 0;
+                }
+            }
+        }
+    }
+
+    /// The options the main screens skip, as a list: Done (first, so Enter
+    /// skips it all) and one entry per option with its value or default.
+    fn advanced(&mut self, i: usize) -> Nav<()> {
+        let ty = self.d.modules[i].ty;
+        let fields = model::advanced(ty);
+        let mut def = 0;
+        loop {
             let m = &self.d.modules[i];
-            let cur = m.get(f.key);
-            let title = format!("{} ({}) {}/{}", m.name, ty.name(), k + 1, fields.len());
-            let check = f.check;
-            match self.ui.text(&title, &p(f.help), f.label, &cur, &check) {
+            let mut opts = vec![Opt::new("Done", "keep these and continue")];
+            let mut changed = 0;
+            for f in &fields {
+                let v = m.get(f.key);
+                let desc = if v.is_empty() {
+                    format!("default ({})", f.default)
+                } else {
+                    changed += 1;
+                    format!("= {v}")
+                };
+                opts.push(Opt::new(f.label, desc));
+            }
+            let body = vec![
+                format!(
+                    "Optional settings for {:?}. Most installations keep the defaults; {changed} of {} changed.",
+                    m.name,
+                    fields.len()
+                ),
+                "Pick one to change it, or Done.".into(),
+            ];
+            let title = format!("{} ({}): advanced", m.name, ty.name());
+            let k = match self.ui.choose(&title, &body, &opts, def) {
+                Nav::Next(0) => return Nav::Next(()),
+                Nav::Next(k) => k - 1,
+                Nav::Back => return Nav::Back,
+                Nav::Quit => return Nav::Quit,
+            };
+            let f = &fields[k];
+            let cur = self.d.modules[i].get(f.key);
+            let check_f = f.check;
+            let check = move |s: &str| if s.is_empty() { Ok(()) } else { check_f(s) };
+            let help = vec![
+                f.help.to_string(),
+                format!("Leave it empty for the default ({}).", f.default),
+            ];
+            match self.ui.text(&title, &help, f.label, &cur, &check) {
                 Nav::Next(v) => {
                     self.d.modules[i].set(f.key, &v, f.kind);
-                    k += 1;
+                    def = 0; // back on Done: change one thing, press Enter twice
                 }
-                Nav::Back if k == 0 => return Nav::Back,
-                Nav::Back => k -= 1,
+                Nav::Back => def = k + 1,
                 Nav::Quit => return Nav::Quit,
             }
         }
-        // A module DYODE would refuse is caught here, not at the end.
-        let mut one = self.d.clone();
-        one.modules = vec![self.d.modules[i].clone()];
-        if let Err(e) = one.validate(self.env) {
-            let _ = self.ui.notice("This module needs a fix", &[e]);
-            return self.edit_fields(i);
-        }
-        Nav::Next(())
     }
 
     fn remove_module(&mut self) -> Nav<()> {
@@ -1226,8 +1354,11 @@ mod tests {
     // welcome, v1, input, new, name, eth0, ip, peer info, peer ip, peer mac,
     // peer iface, ports (suggested), rate, add folder (type, name, in, out),
     // done, key: create, review: write, done.
+    // The folder's advanced screen: settle changed to 5, then Done.
     const FULL: &str = "enter enter enter enter ctrl-u 'Line 3' enter enter enter enter enter \
-                        'b8:27:eb:b1:ff:ab' enter enter enter enter enter enter enter enter enter enter enter enter enter";
+                        'b8:27:eb:b1:ff:ab' enter enter enter enter enter enter enter enter enter \
+                        down enter '5' enter enter \
+                        enter enter enter enter";
 
     #[test]
     fn full_run_writes_a_config_dyode_accepts() {
@@ -1240,7 +1371,10 @@ mod tests {
         let cfg = crate::config::load(&dir.path().join("config.yaml")).unwrap();
         assert_eq!(cfg.lidi.ports, vec![5000, 5001, 5002]);
         assert_eq!(cfg.network.out_mac.as_deref(), Some("b8:27:eb:b1:ff:ab"));
-        assert_eq!(cfg.modules[0].kind.type_name(), "folder");
+        let crate::config::ModuleKind::Folder(f) = &cfg.modules[0].kind else {
+            panic!("not a folder")
+        };
+        assert_eq!(f.settle, 5.0);
         assert!(dir.path().join("dyode.key").is_file());
     }
 
@@ -1265,6 +1399,18 @@ mod tests {
     }
 
     #[test]
+    fn install_mode_question() {
+        let mut ui = DialogUi::new(Virtual::new(80, 24, parse_keys("down enter")));
+        assert_eq!(ask_install_mode(&mut ui, true, true), Some("online"));
+        assert!(ui.backend.frames[0].contains("How should DYODE be installed?"));
+        let mut ui = DialogUi::new(Virtual::new(80, 24, parse_keys("enter")));
+        assert_eq!(ask_install_mode(&mut ui, false, false), Some("online"));
+        // Esc stays on this first screen; running out of keys is Ctrl-C twice.
+        let mut ui = DialogUi::new(Virtual::new(80, 24, parse_keys("esc")));
+        assert_eq!(ask_install_mode(&mut ui, true, true), None);
+    }
+
+    #[test]
     fn preset_side_skips_its_screen() {
         let dir = crate::testutil::TempDir::new();
         let preset = Preset {
@@ -1284,7 +1430,7 @@ mod tests {
         env.dry_run = false;
         env.write_unit = false;
         // v1, out side: the out box's MAC comes from its own card.
-        let answers = "\n1\n2\n1\nPiped\n1\n10.0.1.2\n\n\n\n\n\n1\n1\n\n/srv/a\n/srv/b\n\n1\n\n";
+        let answers = "\n1\n2\n1\nPiped\n1\n10.0.1.2\n\n\n\n\n\n1\n1\n\n/srv/a\n/srv/b\n\n\n1\n\n";
         let mut out = Vec::new();
         let res = run(
             &mut ui::PlainUi::new(answers.as_bytes(), &mut out),

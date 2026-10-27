@@ -12,10 +12,14 @@
   before it is written, old files are backed up, imported files keep every
   option the wizard does not ask about.  New screens for the lidi ports
   (suggested from the CPU count) and rate cap, warnings for the diode card
-  (no link, default route, wrong address), and a key step.
-- `install.sh` runs it when there is no config.yaml and the terminal is
-  interactive (`--wizard` / `--no-wizard` / `--import-config FILE`), then
-  writes the systemd unit from the config it produced.
+  (no link, default route, wrong address), and a key step.  Every module
+  has an Advanced screen with all the options the loader accepts for it,
+  each with its default and validation.
+- `install.sh` asks offline or online first (in the same dialog look, when
+  neither flag is given on a terminal), then runs the guided setup on every
+  interactive install (`--no-wizard` skips it, `--import-config FILE`
+  starts from a file), and writes the systemd unit from the config it
+  produced.
 
 ## [2.0.1] - 2026-10-26
 

@@ -324,11 +324,59 @@ fn cmd_setup(mut args: Args) {
         variant,
         import,
     };
+    // Used by install.sh: ask offline/online before anything is installed,
+    // in the same dialog look, and write the answer to a file.
+    let ask_mode = args.value(&["--ask-install-mode"]);
+    let mode_default = args.value(&["--default"]);
+    let bundle = args.flag(&["--bundle"]);
     // Hidden: run a key script against a fake box and save every screen.
     let demo = args.value(&["--demo-keys"]);
     let demo_out = args.value(&["--demo-out"]);
     let demo_size = args.value(&["--demo-size"]);
     args.done();
+
+    if let Some(answer) = ask_mode {
+        let offline_default = mode_default.as_deref() != Some("online");
+        let script = demo.clone();
+        let res = match (script, plain) {
+            (Some(keys), _) => {
+                let mut dui = ui::DialogUi::new(tui::Virtual::new(80, 24, tui::parse_keys(&keys)));
+                let r = wizard::ask_install_mode(&mut dui, bundle, offline_default);
+                if let Some(out) = &demo_out {
+                    let body: String = dui
+                        .backend
+                        .shots
+                        .iter()
+                        .map(|(_, f)| format!("{f}\n"))
+                        .collect();
+                    let _ = std::fs::write(out, body);
+                }
+                r
+            }
+            (None, false) if tui::Terminal::open().is_ok() => {
+                let t = tui::Terminal::open().expect("terminal");
+                wizard::ask_install_mode(&mut ui::DialogUi::new(t), bundle, offline_default)
+            }
+            _ => {
+                let stdin = std::io::stdin();
+                wizard::ask_install_mode(
+                    &mut ui::PlainUi::new(stdin.lock(), std::io::stderr()),
+                    bundle,
+                    offline_default,
+                )
+            }
+        };
+        match res {
+            Some(mode) => {
+                if let Err(e) = std::fs::write(&answer, format!("{mode}\n")) {
+                    eprintln!("cannot write {answer}: {e}");
+                    exit(1);
+                }
+            }
+            None => exit(3),
+        }
+        return;
+    }
 
     if let Some(script) = demo {
         let (w, h) = demo_size

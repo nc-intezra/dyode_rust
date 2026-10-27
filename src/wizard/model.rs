@@ -98,6 +98,16 @@ impl ModDraft {
             FieldKind::Int => text
                 .parse::<u64>()
                 .map_or_else(|_| Value::String(text.into()), Value::from),
+            FieldKind::Num => match (text.parse::<u64>(), text.parse::<f64>()) {
+                (Ok(n), _) => Value::from(n),
+                (_, Ok(f)) => Value::from(f),
+                _ => Value::String(text.into()),
+            },
+            FieldKind::Bool => match text.to_lowercase().as_str() {
+                "true" | "yes" | "on" | "1" => Value::Bool(true),
+                "false" | "no" | "off" | "0" => Value::Bool(false),
+                _ => Value::String(text.into()),
+            },
             FieldKind::List => {
                 Value::Sequence(split_list(text).into_iter().map(Value::String).collect())
             }
@@ -107,6 +117,19 @@ impl ModDraft {
 
     /// One line describing the module, for menus and the review.
     pub fn summary(&self) -> String {
+        let n = advanced(self.ty)
+            .iter()
+            .filter(|f| !self.get(f.key).is_empty())
+            .count();
+        let s = self.main_summary();
+        if n == 0 {
+            s
+        } else {
+            format!("{s} (+{n} advanced)")
+        }
+    }
+
+    fn main_summary(&self) -> String {
         let g = |k| self.get(k);
         match self.ty {
             ModType::Folder => format!("{} -> {}", g("in"), g("out")),
@@ -186,6 +209,9 @@ pub fn split_list(text: &str) -> Vec<String> {
 pub enum FieldKind {
     Text,
     Int,
+    /// A number that may have decimals (seconds, Mbit/s).
+    Num,
+    Bool,
     List,
 }
 
@@ -333,6 +359,222 @@ pub fn fields(ty: ModType) -> Vec<Field> {
     }
 }
 
+/// The options the main screens do not ask about, with DYODE's defaults.
+/// Empty always means "the default"; `default` is what that is.
+pub fn advanced(ty: ModType) -> Vec<Field> {
+    use FieldKind::*;
+    let f = |key, label, help, default, kind, check| Field {
+        key,
+        label,
+        help,
+        default,
+        kind,
+        check,
+    };
+    match ty {
+        ModType::Folder => vec![
+            f(
+                "settle",
+                "Settle time, s (input box)",
+                "A file must stay unchanged this long before it is sent, so half-written files are not.",
+                "2",
+                Num,
+                check_nonneg,
+            ),
+            f(
+                "rescan",
+                "Rescan interval, s (input box)",
+                "Seconds between full rescans of the folder, besides change notifications.",
+                "30",
+                Num,
+                check_pos,
+            ),
+            f(
+                "bitrate",
+                "Bit rate cap, Mbit/s (input box)",
+                "A cap for this module alone, under lidi.max_mbps. Empty = no cap of its own.",
+                "none",
+                Num,
+                check_ge1,
+            ),
+            f(
+                "keep_sent_hours",
+                "Keep sent files, hours (input box)",
+                "Sent files move to .dyode_sent and stay this long, because a diode gives no proof of delivery. Copy one back to re-send it. 0 = delete at once.",
+                "24",
+                Int,
+                check_nonneg_int,
+            ),
+            f(
+                "staging",
+                "Staging folder (output box)",
+                "Where files are written before their signature is checked. Must not be inside the output folder; keep it on the same filesystem so the final move is atomic.",
+                "<out>.incoming",
+                Text,
+                check_abs_path_opt,
+            ),
+            f(
+                "batch_timeout",
+                "Batch timeout, s (output box)",
+                "With nothing received for this long, an incomplete batch is closed and its missing files named in the log.",
+                "300",
+                Num,
+                check_pos,
+            ),
+        ],
+        ModType::Modbus => vec![
+            f(
+                "plc_port",
+                "PLC port (input box)",
+                "The Modbus TCP port of the PLC.",
+                "502",
+                Int,
+                check_port,
+            ),
+            f(
+                "unit",
+                "Unit id (input box)",
+                "The Modbus unit (slave) id to poll.",
+                "1",
+                Int,
+                check_unit,
+            ),
+            f(
+                "interval",
+                "Poll interval, s (input box)",
+                "Seconds between reads of the PLC.",
+                "1.0",
+                Num,
+                check_pos,
+            ),
+            f(
+                "stale_after",
+                "Stale after, s (output box)",
+                "With no update for this long, the mirror answers with an exception instead of old values.",
+                "10",
+                Num,
+                check_pos,
+            ),
+            f(
+                "bind_out",
+                "Listen address (output box)",
+                "The address the Modbus server listens on.",
+                "0.0.0.0",
+                Text,
+                check_ipv4,
+            ),
+            f(
+                "unmapped",
+                "Outside the ranges (output box)",
+                "exception: reads outside the ranges get Modbus exception 02. zero: they read as 0.",
+                "exception",
+                Text,
+                check_unmapped,
+            ),
+        ],
+        ModType::Screen => vec![
+            f(
+                "http_bind",
+                "Web page address (output box)",
+                "The address the page listens on. Default: the first address not on the diode card (the IT side).",
+                "auto",
+                Text,
+                check_ipv4,
+            ),
+            f(
+                "max_fps",
+                "Frames per second (output box)",
+                "The most images per second sent to each viewer.",
+                "10",
+                Num,
+                check_pos,
+            ),
+            f(
+                "max_streams",
+                "Viewers at once (output box)",
+                "How many browsers can watch at the same time.",
+                "8",
+                Int,
+                check_pos_int,
+            ),
+        ],
+        ModType::Logs => vec![
+            f(
+                "listen_tcp",
+                "Syslog over TCP (input box)",
+                "A port (601) or address:port; LF or octet-counted framing. Empty = no TCP listener.",
+                "none",
+                Text,
+                check_hostport_opt,
+            ),
+            f(
+                "tail_from",
+                "Start new files from (input box)",
+                "end: only lines written from now on. start: the whole file the first time it is seen.",
+                "end",
+                Text,
+                check_tail_from,
+            ),
+            f(
+                "tail_state",
+                "Tail position file (input box)",
+                "Where followed files' positions are kept across restarts.",
+                "/var/lib/dyode/tail.json",
+                Text,
+                check_abs_path_opt,
+            ),
+            f(
+                "copies",
+                "Copies of each batch (input box)",
+                "Every batch is sent again about 0.5 s later, so a lost lidi block must hit every copy. 1 to 4.",
+                "2",
+                Int,
+                check_copies,
+            ),
+            f(
+                "max_kbps",
+                "Rate cap, kbit/s (input box)",
+                "This module's share of the link.",
+                "2000",
+                Num,
+                check_kbps,
+            ),
+            f(
+                "heartbeat",
+                "Heartbeat, s (input box)",
+                "A small message sent this often when there are no logs, so the output box can tell silence from a cut link.",
+                "10",
+                Num,
+                check_ge1,
+            ),
+            f(
+                "stale_after",
+                "Silence warning, s (output box)",
+                "Warn when nothing, not even a heartbeat, arrives for this long.",
+                "3 x heartbeat",
+                Num,
+                check_ge1,
+            ),
+            f(
+                "format",
+                "File format (output box)",
+                "prefixed: time and source before each line. raw: the line as received. json: one object per line.",
+                "prefixed",
+                Text,
+                check_format,
+            ),
+            f(
+                "split_by_source",
+                "One file per sender (output box)",
+                "true: received.log is split into one file per sending host.",
+                "false",
+                Bool,
+                check_bool,
+            ),
+        ],
+    }
+}
+
 // --------------------------------------------------------------------------
 // Checks: each returns the message the person sees.
 // --------------------------------------------------------------------------
@@ -422,6 +664,67 @@ fn check_hostport_opt(s: &str) -> Result<(), String> {
         (_, 0) => Err("the port cannot be 0".into()),
         _ => Ok(()),
     }
+}
+
+fn check_number(s: &str, ok: impl Fn(f64) -> bool, what: &str) -> Result<(), String> {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() && ok(v) => Ok(()),
+        _ => Err(what.into()),
+    }
+}
+fn check_nonneg(s: &str) -> Result<(), String> {
+    check_number(s, |v| v >= 0.0, "a number, 0 or more")
+}
+fn check_pos(s: &str) -> Result<(), String> {
+    check_number(s, |v| v > 0.0, "a number above 0")
+}
+fn check_ge1(s: &str) -> Result<(), String> {
+    check_number(s, |v| v >= 1.0, "a number, 1 or more")
+}
+fn check_kbps(s: &str) -> Result<(), String> {
+    check_number(s, |v| v >= 8.0, "a number of kbit/s, 8 or more")
+}
+fn check_nonneg_int(s: &str) -> Result<(), String> {
+    s.parse::<u64>()
+        .map(|_| ())
+        .map_err(|_| "a whole number, 0 or more".into())
+}
+fn check_pos_int(s: &str) -> Result<(), String> {
+    match s.parse::<u64>() {
+        Ok(n) if n > 0 => Ok(()),
+        _ => Err("a whole number above 0".into()),
+    }
+}
+fn check_unit(s: &str) -> Result<(), String> {
+    match s.parse::<u8>() {
+        Ok(_) => Ok(()),
+        _ => Err("a unit id, 0 to 255".into()),
+    }
+}
+fn check_copies(s: &str) -> Result<(), String> {
+    match s.parse::<u8>() {
+        Ok(1..=4) => Ok(()),
+        _ => Err("1, 2, 3 or 4".into()),
+    }
+}
+fn one_of(s: &str, allowed: &[&str]) -> Result<(), String> {
+    if allowed.iter().any(|a| a.eq_ignore_ascii_case(s)) {
+        Ok(())
+    } else {
+        Err(format!("one of: {}", allowed.join(", ")))
+    }
+}
+fn check_unmapped(s: &str) -> Result<(), String> {
+    one_of(s, &["exception", "zero"])
+}
+fn check_format(s: &str) -> Result<(), String> {
+    one_of(s, &["prefixed", "raw", "json"])
+}
+fn check_tail_from(s: &str) -> Result<(), String> {
+    one_of(s, &["end", "start"])
+}
+fn check_bool(s: &str) -> Result<(), String> {
+    one_of(s, &["true", "false", "yes", "no"])
 }
 
 pub fn check_ports(s: &str) -> Result<(), String> {
@@ -1147,6 +1450,33 @@ mod tests {
         assert!(check_forwards("udp://10.0.0.5:514").is_ok());
         assert!(check_cidrs("192.168.1.0/24, 10.0.0.1").is_ok());
         assert!(check_cidrs("nope").is_err());
+    }
+
+    #[test]
+    fn advanced_defaults_are_valid_and_accepted() {
+        // Every advanced field, set to its default (where that is a value),
+        // gives a config DYODE accepts.
+        let dir = crate::testutil::TempDir::new();
+        let env = fake_env(dir.path());
+        for ty in ModType::ALL {
+            let mut d = Draft::new();
+            d.out_mac = "b8:27:eb:b1:ff:ab".into();
+            let mut m = ModDraft::new("M", ty);
+            for f in fields(ty) {
+                m.set(f.key, f.default, f.kind);
+            }
+            for f in advanced(ty) {
+                if (f.check)(f.default).is_ok() {
+                    m.set(f.key, f.default, f.kind);
+                }
+            }
+            if ty == ModType::Screen {
+                m.set("http_bind", "192.168.50.4", FieldKind::Text);
+            }
+            d.modules.push(m);
+            d.validate(&env)
+                .unwrap_or_else(|e| panic!("{ty:?}: {e}\n{}", d.to_yaml()));
+        }
     }
 
     #[test]

@@ -12,7 +12,8 @@
 #                      fetched.  The whole bundle is checked against
 #                      SHA256SUMS before anything is changed.
 #   --online           apt for OS packages; cargo may build the binary
-#                      (default: offline when this folder is a bundle)
+#                      (neither given: asked on an interactive terminal,
+#                      else offline when this folder is a bundle)
 #   --with LIST        also install file-sharing services for the received
 #                      files: ssh, nfs, smb (comma-separated).  Packages only:
 #                      configure the shares yourself (never share *.incoming).
@@ -28,10 +29,11 @@
 #   --no-tuning        do not install the kernel settings
 #   --firewall-only    only (re)apply the firewall rules from config.yaml
 #   --tuning-only      only (re)apply the kernel settings
-#   --wizard           always run the guided setup (dyode setup) -- by default
-#                      it runs when there is no config.yaml yet and this is
-#                      an interactive terminal
-#   --no-wizard        never run it (config.yaml from config.example.yaml)
+#   --no-wizard        do not run the guided setup (dyode setup), which
+#                      otherwise runs on every interactive install; an
+#                      existing config.yaml is then kept, or one is made
+#                      from config.example.yaml
+#   --wizard           run it, and say so when the terminal cannot
 #   --import-config F  start the guided setup from this config.yaml (e.g. the
 #                      other box's)
 #   --no-enable        write the systemd units but do not enable/start them
@@ -119,8 +121,44 @@ SUPPORTED="Ubuntu 24.04 and 26.04, Debian 12 and 13 / Raspberry Pi OS bookworm a
 is_bundle() { [ -f "$ROOT/SHA256SUMS" ] && [ -d "$ROOT/bin" ]; }
 debs_present() { [ -n "$OS_ID" ] && ls "$DEB_DIR"/*.deb >/dev/null 2>&1; }
 
+interactive() { [ -t 0 ] && [ -t 1 ]; }
+
+# Offline or online, asked before anything is installed: in a dialog box
+# by the dyode binary when one is at hand (the bundle's, a local build),
+# else as a plain question.
+ask_mode() {
+  local def=online bin="" c ans rc=0
+  is_bundle && def=offline
+  for c in "$BINARY" "$BUNDLE_BIN" "$ROOT/target/release/dyode" "$PREFIX/dyode"; do
+    if [ -n "$c" ] && [ -x "$c" ] && "$c" version >/dev/null 2>&1; then bin="$c"; break; fi
+  done
+  if [ -n "$bin" ]; then
+    ans="$(mktemp)"
+    # shellcheck disable=SC2046
+    "$bin" setup --ask-install-mode "$ans" --default "$def" $(is_bundle && echo --bundle) || rc=$?
+    MODE="$(cat "$ans" 2>/dev/null || true)"; rm -f "$ans"
+    [ "$rc" -eq 3 ] && die "installation cancelled; nothing was changed"
+    case "$MODE" in offline|online) return 0 ;; esac
+  fi
+  local hint="this folder is not an offline bundle"
+  is_bundle && hint="this folder is an offline bundle"
+  while :; do
+    printf 'Install offline (only this folder) or online (apt, cargo)?  [%s] (%s): ' "$def" "$hint"
+    read -r ans || die "no answer; nothing was changed"
+    case "${ans:-$def}" in
+      offline|off|o|1) MODE=offline; return 0 ;;
+      online|on|n|2) MODE=online; return 0 ;;
+      q|quit) die "installation cancelled; nothing was changed" ;;
+    esac
+  done
+}
+
 if [ -z "$MODE" ]; then
-  if is_bundle; then MODE=offline; else MODE=online; fi
+  if interactive && [ "$FIREWALL_ONLY" -eq 0 ] && [ "$TUNING_ONLY" -eq 0 ]; then
+    ask_mode
+  elif is_bundle; then MODE=offline
+  else MODE=online
+  fi
 fi
 
 # -------------------------------------------------------- OS packages
@@ -357,11 +395,8 @@ say "   $PREFIX/dyode ($("$DYODE" version 2>/dev/null || echo '?'))"
 step "configuration in $ETC"
 run mkdir -p "$ETC"
 run_wizard() {
-  case "$WIZARD" in
-    no) return 1 ;;
-    auto) [ ! -f "$ETC/config.yaml" ] || return 1 ;;
-  esac
-  if [ ! -t 0 ] || [ ! -t 1 ]; then
+  [ "$WIZARD" = no ] && return 1
+  if ! interactive; then
     [ "$WIZARD" = yes ] && warn "--wizard needs an interactive terminal; skipping the guided setup"
     return 1
   fi
