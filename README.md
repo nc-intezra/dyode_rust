@@ -43,11 +43,20 @@ and run `sudo ./install.sh --offline --side in|out` from it: see
 ```bash
 cargo build --release                       # -> target/release/dyode
 sudo ./install.sh --side in                 # on the input box
-sudo ./install.sh --side out                # on the output box
-dyode interfaces                            # NICs and MAC addresses, for config.yaml
-sudo $EDITOR /etc/dyode/config.yaml         # SAME file on both boxes
-sudo dyode new-key -c /etc/dyode/config.yaml   # on ONE box; copy dyode.key to the other
-sudo dyode check -c /etc/dyode/config.yaml --side in
+sudo ./install.sh --side out --import-config /media/usb/config.yaml   # output box
+```
+
+On a terminal, `install.sh` first asks whether to install offline or
+online, then runs the guided setup (`dyode setup`): dialog boxes for the
+diode network card, addresses, lidi ports, modules (each with an Advanced
+screen) and the shared key.  It writes `/etc/dyode/config.yaml`, checked
+by DYODE's own loader, and the systemd unit is generated from it.  Set up
+one box, then import its config.yaml on the other.  `dyode setup` can be
+run again at any time; `--no-wizard` skips it, and `dyode setup --plain`
+asks plain questions instead of drawing dialogs.  Then:
+
+```bash
+sudo dyode check -c /etc/dyode/config.yaml --side in   # also compares the installed unit
 sudo systemctl enable --now dyode-in        # dyode-out on the output box
 sudo ./install.sh --side out --firewall-only   # output box, once config.yaml is final
 ```
@@ -65,8 +74,9 @@ lidi parameters must match.
 |---|---|
 | `dyode in` / `dyode out` | run the input / output side (v1, lidi) |
 | `dyode serial-in` / `serial-out` | run DYODE v2 (Modbus over serial) |
+| `dyode setup` | guided setup in dialog boxes (or `--plain` questions) |
 | `dyode new-key` | create the shared message key |
-| `dyode check` | validate config.yaml and the key, list endpoints |
+| `dyode check` | validate config.yaml, the key and the installed unit; throughput hints |
 | `dyode lidi-config` | print the lidi parameters derived from config.yaml |
 | `dyode interfaces` | list NICs with MAC, state and IPv4 |
 | `dyode systemd-unit --side in\|out` | print the systemd unit |

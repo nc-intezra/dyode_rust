@@ -1,9 +1,22 @@
 # Changelog
 
-## [Unreleased]
+## [2.0.2] - unreleased
 
 ### Added
 
+- **`parallel_files`** per folder module (1 to 16, default 1): that many
+  files of a batch in flight at once, each its own lidi transfer, spread
+  over the lidi ports.  `lidi.max_clients` now defaults to what the modules
+  can have in flight (parallel files included) plus 2.
+- **`dyode check`** compares the installed `dyode-in/out.service` with
+  config.yaml: a unit waiting for another network card than the config's
+  (it would never start), the wrong command for the side, a different
+  config path.  It also suggests more lidi ports for the box's CPUs, and
+  warns when an explicit `max_clients` is below what the modules need.
+- Reference systemd units in `packaging/systemd/reference/` (v1 and v2,
+  both sides), kept identical to the generator by a test.
+- The guided setup suggests the lidi port count from the CPU count and asks
+  `parallel_files` on the folder module's Advanced screen.
 - **`dyode setup`**, the guided setup DYODE (Python) 1.5 had, back in dialog
   boxes (ncurses/whiptail look, drawn by the binary itself, so it works from
   the offline bundle, over ssh and on serial consoles).  Plain numbered

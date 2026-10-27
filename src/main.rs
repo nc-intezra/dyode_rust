@@ -204,13 +204,16 @@ fn cmd_check(mut args: Args) {
             m.name
         );
     }
+    let mut warnings = unit_warnings(&cfg, side.as_deref(), serial);
     if serial {
         println!(
             "  serial: {} @ {} baud (v2: no key needed)",
             cfg.serial.device, cfg.serial.baudrate
         );
+        print_warnings(&warnings);
         return;
     }
+    warnings.extend(throughput_hints(&cfg));
     match auth::load_key(&cfg.auth) {
         Ok(Some(_)) => println!("  key: {} OK", cfg.auth.key_file.display()),
         Ok(None) => println!("  key: none (auth.required is false: NOT authenticated)"),
@@ -224,10 +227,78 @@ fn cmd_check(mut args: Args) {
         exit(1);
     }
     if side.as_deref() == Some("in") && cfg.network.out_mac.is_none() {
-        println!(
-            "  warning: dyode_out.mac is not set: the input box cannot reach the output box through a diode"
+        warnings.insert(
+            0,
+            "dyode_out.mac is not set: the input box cannot reach the output box through a diode"
+                .into(),
         );
     }
+    print_warnings(&warnings);
+}
+
+fn print_warnings(w: &[String]) {
+    for l in w {
+        println!("  warning: {l}");
+    }
+}
+
+/// Compare the installed systemd unit(s) with config.yaml: the side asked
+/// for, or every DYODE unit present.
+fn unit_warnings(cfg: &config::Config, side: Option<&str>, serial: bool) -> Vec<String> {
+    let dir = PathBuf::from(
+        std::env::var("DYODE_SYSTEMD_DIR").unwrap_or_else(|_| "/etc/systemd/system".into()),
+    );
+    let sides: Vec<Side> = match side {
+        Some("in") => vec![Side::In],
+        Some("out") => vec![Side::Out],
+        _ => vec![Side::In, Side::Out],
+    };
+    let mut w = Vec::new();
+    for s in sides {
+        let path = dir.join(setup::unit_name(s));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let found = setup::check_unit(&text, s, cfg, serial);
+                if found.is_empty() {
+                    println!("  unit: {} matches", path.display());
+                }
+                w.extend(found);
+            }
+            Err(_) if side.is_some() => w.push(format!(
+                "{} is not installed: run install.sh (or dyode setup) to create it",
+                path.display()
+            )),
+            Err(_) => {}
+        }
+    }
+    w
+}
+
+/// Suggestions for using the box's cores, never errors.
+fn throughput_hints(cfg: &config::Config) -> Vec<String> {
+    let mut w = Vec::new();
+    let cpus = std::thread::available_parallelism().map_or(1, usize::from);
+    let suggested = dyode::wizard::model::suggested_ports(cpus);
+    if cfg.lidi.ports.len() < suggested {
+        let first = cfg.lidi.ports.first().copied().unwrap_or(5000);
+        w.push(format!(
+            "lidi uses {} port(s) on a {cpus}-CPU box: one RaptorQ thread per port.  For more throughput set \
+             lidi.ports: [{}] -- in the config of BOTH boxes, and only if the other box has the cores too",
+            cfg.lidi.ports.len(),
+            dyode::wizard::model::port_list(first, suggested)
+        ));
+    }
+    if let Some(m) = cfg.lidi.max_clients {
+        let need = cfg.concurrent_transfers();
+        if m < need {
+            w.push(format!(
+                "lidi.max_clients is {m}, but the modules can have {need} transfers in flight (parallel_files \
+                 included): transfers will wait for each other.  Remove max_clients to get {} automatically",
+                need + 2
+            ));
+        }
+    }
+    w
 }
 
 fn cmd_unit(mut args: Args) {
