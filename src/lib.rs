@@ -23,7 +23,9 @@ pub mod setup;
 pub mod supervisor;
 pub mod timefmt;
 pub mod transport;
+pub mod tui;
 pub mod watch;
+pub mod wizard;
 
 #[doc(hidden)]
 pub mod testutil;

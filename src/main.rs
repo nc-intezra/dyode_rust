@@ -20,6 +20,10 @@ Running (both boxes read the same config.yaml):
     --log-level LEVEL      DEBUG, INFO (default), WARNING or ERROR
 
 Setting up:
+  setup         guided setup in dialog boxes (plain questions when not on a
+                terminal): writes config.yaml, the key and the systemd unit.
+                [--side in|out] [--variant v1|v2] [--etc DIR] [--plain]
+                [--import-config FILE] [--dry-run] [--no-unit]
   new-key       create the shared message key (once, on ONE box; copy it to
                 the other):  [-c config.yaml] [--key-file FILE]
   check         validate config.yaml and the key:  [-c FILE] [--side in|out]
@@ -275,6 +279,132 @@ fn cmd_unit(mut args: Args) {
     );
 }
 
+/// Can we create or change files in `dir` (or where it would be created)?
+fn writable(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let mut p = dir;
+    while !p.exists() {
+        match p.parent() {
+            Some(q) => p = q,
+            None => return false,
+        }
+    }
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: a valid C string.
+    unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+}
+
+fn cmd_setup(mut args: Args) {
+    use dyode::tui;
+    use dyode::wizard::{self, model, ui};
+    let plain = args.flag(&["--plain"]);
+    let dry_run = args.flag(&["--dry-run"]);
+    let no_unit = args.flag(&["--no-unit"]);
+    let etc = PathBuf::from(
+        args.value(&["--etc"])
+            .unwrap_or_else(|| "/etc/dyode".into()),
+    );
+    let side = match args.value(&["--side"]).as_deref() {
+        None => None,
+        Some("in") => Some(Side::In),
+        Some("out") => Some(Side::Out),
+        Some(o) => die_usage(&format!("--side must be in or out, not {o:?}")),
+    };
+    let variant = match args.value(&["--variant"]).as_deref() {
+        None => None,
+        Some("v1") => Some(model::Variant::V1),
+        Some("v2") => Some(model::Variant::V2),
+        Some(o) => die_usage(&format!("--variant must be v1 or v2, not {o:?}")),
+    };
+    let import = args.value(&["--import-config"]).map(PathBuf::from);
+    let preset = wizard::Preset {
+        side,
+        variant,
+        import,
+    };
+    // Hidden: run a key script against a fake box and save every screen.
+    let demo = args.value(&["--demo-keys"]);
+    let demo_out = args.value(&["--demo-out"]);
+    let demo_size = args.value(&["--demo-size"]);
+    args.done();
+
+    if let Some(script) = demo {
+        let (w, h) = demo_size
+            .and_then(|s| {
+                s.split_once('x')
+                    .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
+            })
+            .unwrap_or((80, 24));
+        let mut env = wizard::demo_env(etc);
+        env.dry_run = true;
+        env.write_unit = !no_unit;
+        let mut dui = ui::DialogUi::new(tui::Virtual::new(w, h, tui::parse_keys(&script)));
+        let out = wizard::run(&mut dui, &env, preset);
+        let frames = &dui.backend.shots;
+        let path = demo_out.unwrap_or_else(|| "setup-demo.html".into());
+        let body: String = frames.iter().map(|(_, f)| format!("{f}\n")).collect();
+        std::fs::write(&path, body).unwrap_or_else(|e| {
+            eprintln!("cannot write {path}: {e}");
+            exit(1)
+        });
+        println!(
+            "{} screens to {path} ({})",
+            frames.len(),
+            if matches!(out, wizard::Outcome::Quit) {
+                "ended before writing"
+            } else {
+                "reached the end"
+            }
+        );
+        return;
+    }
+
+    if !dry_run && !writable(&etc) {
+        eprintln!(
+            "dyode setup writes to {} and /etc/systemd: run it with sudo (or try --dry-run).",
+            etc.display()
+        );
+        exit(1);
+    }
+    let mut env = model::Env::real(etc, dry_run);
+    if no_unit {
+        env.write_unit = false;
+    }
+    let term = if plain {
+        None
+    } else {
+        tui::Terminal::open().ok()
+    };
+    let out = match term {
+        Some(t) => wizard::run(&mut ui::DialogUi::new(t), &env, preset),
+        None => {
+            let stdin = std::io::stdin();
+            wizard::run(
+                &mut ui::PlainUi::new(stdin.lock(), std::io::stdout()),
+                &env,
+                preset,
+            )
+        }
+    };
+    match out {
+        wizard::Outcome::Quit => {
+            eprintln!("setup left; nothing was written.");
+            exit(3);
+        }
+        wizard::Outcome::Written { done, next, .. } => {
+            for l in done {
+                println!("{l}");
+            }
+            println!("\nNext:");
+            for l in next {
+                println!("  {l}");
+            }
+        }
+    }
+}
+
 fn cmd_interfaces(mut args: Args) {
     let all = args.flag(&["--all"]);
     args.done();
@@ -373,6 +503,7 @@ fn main() {
             print!("{}", transport::lidi_toml(&load(p)));
         }
         "interfaces" => cmd_interfaces(args),
+        "setup" => cmd_setup(args),
         "firewall-rules" => {
             let p = args.value(&["-c", "--config"]);
             let iface_only = args.flag(&["--interface"]);

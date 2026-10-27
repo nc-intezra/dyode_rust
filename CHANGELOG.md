@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`dyode setup`**, the guided setup DYODE (Python) 1.5 had, back in dialog
+  boxes (ncurses/whiptail look, drawn by the binary itself, so it works from
+  the offline bundle, over ssh and on serial consoles).  Plain numbered
+  questions when there is no usable terminal, or with `--plain`.  Esc goes
+  back on every screen; the result is checked by DYODE's own config loader
+  before it is written, old files are backed up, imported files keep every
+  option the wizard does not ask about.  New screens for the lidi ports
+  (suggested from the CPU count) and rate cap, warnings for the diode card
+  (no link, default route, wrong address), and a key step.
+- `install.sh` runs it when there is no config.yaml and the terminal is
+  interactive (`--wizard` / `--no-wizard` / `--import-config FILE`), then
+  writes the systemd unit from the config it produced.
+
 ## [2.0.1] - 2026-10-26
 
 ### Added
