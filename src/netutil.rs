@@ -102,6 +102,7 @@ pub fn run_arp_keeper(net: &Network) -> Result<(), String> {
     let mut healthy: Option<bool> = None;
     loop {
         let ok = set_static_arp(net);
+        crate::stats::set_arp_ok(ok);
         if Some(ok) != healthy {
             if ok {
                 log::info!(

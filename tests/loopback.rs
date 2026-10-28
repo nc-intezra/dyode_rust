@@ -175,7 +175,11 @@ fn folder_parallel_files_through_lidi() {
         d = d.path().display()
     );
     let cfg = config::parse(&yaml, Path::new("config.yaml"), d.path()).unwrap();
-    assert_eq!(cfg.max_clients(), 6, "4 files + summary + heartbeat");
+    assert_eq!(
+        cfg.max_clients(),
+        7,
+        "4 files + summary + heartbeat + status"
+    );
     let key = Some(vec![7u8; 32]);
     let ModuleKind::Folder(fc) = &cfg.modules[0].kind else {
         panic!()

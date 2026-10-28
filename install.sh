@@ -179,6 +179,10 @@ if [ "$SKIP_OS" -eq 0 ] && [ "$FIREWALL_ONLY" -eq 0 ] && [ "$TUNING_ONLY" -eq 0 
   if [ "$SIDE" = in ] && [ "$VARIANT" = v1 ] && ! command -v ip >/dev/null 2>&1; then
     PKGS+=(iproute2)
   fi
+  # openssl: 'dyode api-cert' and the guided setup make the API's TLS certificate with it.
+  if [ "$VARIANT" = v1 ] && ! command -v openssl >/dev/null 2>&1; then
+    PKGS+=(openssl)
+  fi
   for svc in $WITH; do
     for pkg in $(service_pkgs "$svc"); do pkg_installed "$pkg" || PKGS+=("$pkg"); done
   done

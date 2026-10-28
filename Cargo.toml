@@ -1,6 +1,6 @@
 [package]
 name = "dyode"
-version = "2.0.2"
+version = "2.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
@@ -16,7 +16,10 @@ name = "dyode"
 path = "src/main.rs"
 
 [features]
-default = []
+# The local API (docs/API.md): TLS through rustls, tokens.  Build with
+# --no-default-features for a dyode that never listens for API requests.
+default = ["api"]
+api = ["dep:rustls", "dep:httparse"]
 # mimalloc as the global allocator (through lidi), for the release binaries.
 mimalloc = ["lidi-send/mimalloc", "lidi-receive/mimalloc"]
 # Prometheus metrics from the embedded lidi engines (lidi.prometheus_listen).
@@ -43,6 +46,9 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 tar = { version = "0.4", default-features = false }
 toml = "1"
+# --- the local API (feature "api") ---
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+httparse = { version = "1", optional = true }
 
 [profile.release]
 opt-level = 3

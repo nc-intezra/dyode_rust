@@ -9,6 +9,7 @@
 # DYODE itself is one self-contained binary and needs no OS packages beyond:
 #   nftables   the output box's diode-port firewall (install.sh)
 #   iproute2   'ip neigh', for the input box's static ARP entry
+#   openssl    the local API's TLS certificate (dyode api-cert)
 # plus the optional services for serving received files that
 # `install.sh --with ssh,nfs,smb` installs.
 #
@@ -37,7 +38,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_BASE="${OUT_BASE:-$ROOT/packaging/debs}"
 TARGETS="${TARGETS:-ubuntu-24.04/amd64 ubuntu-24.04/arm64 ubuntu-26.04/amd64 ubuntu-26.04/arm64 debian-12/amd64 debian-12/arm64 debian-13/amd64 debian-13/arm64}"
 # Keep in step with core_pkgs()/service_pkgs() in install.sh.
-CORE_PKGS="nftables iproute2"
+CORE_PKGS="nftables iproute2 openssl"
 SERVICE_PKGS="openssh-server openssh-sftp-server openssh-client nfs-common nfs-kernel-server samba cifs-utils smbclient"
 PKGS="$CORE_PKGS $SERVICE_PKGS"
 

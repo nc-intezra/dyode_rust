@@ -401,6 +401,33 @@ impl Module {
     }
 }
 
+/// One box's local API (see docs/API.md).
+#[derive(Clone, Debug)]
+pub struct ApiListen {
+    pub listen: SocketAddr,
+    /// Certificate chain and private key (PEM).  None only on loopback.
+    pub tls: Option<(PathBuf, PathBuf)>,
+    /// Hashed bearer tokens, one file per box (`dyode api-token`).
+    pub tokens: PathBuf,
+    /// Simultaneous connections.
+    pub max_clients: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ApiConfig {
+    pub input: Option<ApiListen>,
+    pub output: Option<ApiListen>,
+}
+
+impl ApiConfig {
+    pub fn for_side(&self, side: Side) -> Option<&ApiListen> {
+        match side {
+            Side::In => self.input.as_ref(),
+            Side::Out => self.output.as_ref(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub path: PathBuf,
@@ -412,6 +439,7 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub auth: AuthConfig,
     pub lidi: LidiConfig,
+    pub api: ApiConfig,
     pub modules: Vec<Module>,
 }
 
@@ -434,12 +462,13 @@ impl Config {
             .sum()
     }
 
-    /// lidi max_clients: configured, or what the modules need plus two
-    /// (a batch summary and a heartbeat may overlap the transfers).
+    /// lidi max_clients: configured, or what the modules need plus three
+    /// (a batch summary, a heartbeat and a status message may overlap the
+    /// transfers).
     pub fn max_clients(&self) -> u32 {
         self.lidi
             .max_clients
-            .unwrap_or(self.concurrent_transfers() + 2)
+            .unwrap_or(self.concurrent_transfers() + 3)
     }
 }
 
@@ -762,6 +791,7 @@ pub fn parse(text: &str, path: &Path, base_dir: &Path) -> Result<Config> {
     let logging = normalize_logging(key(&raw, "logging"))?;
     let auth = normalize_auth(key(&raw, "auth"), base_dir)?;
     let lidi = normalize_lidi(key(&raw, "lidi"))?;
+    let api = normalize_api(key(&raw, "api"), base_dir, &network)?;
 
     let cfg = Config {
         path: path.to_path_buf(),
@@ -773,12 +803,112 @@ pub fn parse(text: &str, path: &Path, base_dir: &Path) -> Result<Config> {
         logging,
         auth,
         lidi,
+        api,
         modules,
     };
     if cfg.max_clients() < 1 {
         bail!("'lidi.max_clients' must be at least 1");
     }
     Ok(cfg)
+}
+
+/// `api: {in: {...}, out: {...}}`: each box's own listener.
+fn normalize_api(raw: Option<&Value>, base_dir: &Path, net: &Network) -> Result<ApiConfig> {
+    let empty = Mapping::new();
+    let m = match raw {
+        None => &empty,
+        Some(Value::Mapping(m)) => m,
+        Some(_) => bail!("'api' must be a mapping with 'in' and/or 'out'"),
+    };
+    for k in m.keys().filter_map(as_text) {
+        if k != "in" && k != "out" {
+            bail!("'api': unknown key {k:?} (expected 'in' and/or 'out', one per box)");
+        }
+    }
+    let side = |name: &str, diode_ip: Ipv4Addr| -> Result<Option<ApiListen>> {
+        let Some(v) = key(m, name) else {
+            return Ok(None);
+        };
+        let Value::Mapping(s) = v else {
+            bail!("'api.{name}' must be a mapping");
+        };
+        let mut unknown: Vec<String> = s
+            .keys()
+            .filter_map(as_text)
+            .filter(|k| !["listen", "tls", "tokens", "max_clients"].contains(&k.as_str()))
+            .collect();
+        if !unknown.is_empty() {
+            unknown.sort();
+            bail!("'api.{name}': unknown key(s) {}", unknown.join(", "));
+        }
+        let listen_text = key(s, "listen").and_then(as_text).ok_or_else(|| {
+            ConfigError(format!(
+                "'api.{name}.listen' is required (address:port of the management NIC)"
+            ))
+        })?;
+        let listen: SocketAddr = listen_text.trim().parse().map_err(|_| {
+            ConfigError(format!(
+                "'api.{name}.listen' must be address:port, got {listen_text:?}"
+            ))
+        })?;
+        if listen.ip().is_unspecified() {
+            bail!(
+                "'api.{name}.listen' must name one address, not {}: listening on every interface includes the diode NIC",
+                listen.ip()
+            );
+        }
+        if listen.ip() == std::net::IpAddr::V4(diode_ip) {
+            bail!(
+                "'api.{name}.listen' is this box's diode address {diode_ip}: the API must listen on the management NIC"
+            );
+        }
+        let resolve = |p: String| {
+            let p = PathBuf::from(p);
+            if p.is_absolute() { p } else { base_dir.join(p) }
+        };
+        let tls = match key(s, "tls") {
+            None => bail!(
+                "'api.{name}.tls' is required: {{cert: api.crt, key: api.key}} (dyode api-cert makes them)"
+            ),
+            Some(Value::Mapping(t)) => {
+                let file = |k: &str| {
+                    key(t, k).and_then(as_text).map(resolve).ok_or_else(|| {
+                        ConfigError(format!("'api.{name}.tls.{k}' is required (PEM file)"))
+                    })
+                };
+                Some((file("cert")?, file("key")?))
+            }
+            Some(v) if matches!(as_text(v).as_deref(), Some("off" | "false")) => None,
+            Some(other) => {
+                bail!("'api.{name}.tls' must be {{cert: ..., key: ...}} or off, got {other:?}")
+            }
+        };
+        if tls.is_none() && !listen.ip().is_loopback() {
+            bail!(
+                "'api.{name}.tls: off' is only allowed on 127.0.0.1 (behind your own reverse proxy)"
+            );
+        }
+        let tokens = key(s, "tokens")
+            .and_then(as_text)
+            .map_or_else(|| base_dir.join("api-tokens"), resolve);
+        let max_clients = match key(s, "max_clients") {
+            None => 32,
+            Some(v) => match as_int_trunc(v) {
+                Some(n) if (1..=1024).contains(&n) => n as usize,
+                _ => bail!("'api.{name}.max_clients' must be 1 to 1024"),
+            },
+        };
+        Ok(Some(ApiListen {
+            listen,
+            tls,
+            tokens,
+            max_clients,
+        }))
+    };
+    Ok(ApiConfig {
+        input: side("in", net.in_ip)?,
+        output: side("out", net.out_ip)?,
+    })
 }
 
 fn normalize_auth(raw: Option<&Value>, base_dir: &Path) -> Result<AuthConfig> {
@@ -1466,7 +1596,7 @@ mod tests {
         assert_eq!(cfg.lidi.ports, vec![5001, 5002]);
         assert_eq!(cfg.lidi.max_mbps, None);
         assert_eq!(load_text(EXAMPLE).unwrap().lidi.max_mbps, Some(100.0));
-        assert_eq!(cfg.max_clients(), 3);
+        assert_eq!(cfg.max_clients(), 4);
         let t2 = "lidi:\n  bogus: 1\nmodules:\n  m:\n    type: modbus\n    ip: 1.2.3.4\n    registers: [0-10]\n";
         assert!(load_text(t2).is_err());
     }
