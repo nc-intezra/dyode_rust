@@ -1061,6 +1061,16 @@ fn normalize_lidi(raw: Option<&Value>) -> Result<LidiConfig> {
     if let Some(v) = key(m, "ports") {
         let items: Vec<Value> = match v {
             Value::Sequence(s) => s.clone(),
+            // "-5000\n-5001" (no space after the dash) is one string in YAML,
+            // not a list: say so instead of "must be a list".
+            Value::String(s)
+                if s.split_whitespace().count() > 1
+                    && s.split_whitespace().all(|w| w.starts_with('-')) =>
+            {
+                bail!(
+                    "'lidi.ports' reads as the text {s:?}, not a list: YAML needs a space after each dash (\"- 5000\"), or write ports: [5000, 5001]"
+                )
+            }
             Value::String(s) => s
                 .split(',')
                 .map(|p| Value::String(p.trim().into()))
@@ -1597,6 +1607,13 @@ mod tests {
         assert_eq!(cfg.lidi.max_mbps, None);
         assert_eq!(load_text(EXAMPLE).unwrap().lidi.max_mbps, Some(100.0));
         assert_eq!(cfg.max_clients(), 4);
+        let e = parse(
+            "lidi:\n  ports:\n    -5000\n    -5001\nmodules:\n  a: {type: folder, in: /a, out: /b}\n",
+            Path::new("c.yaml"),
+            Path::new("."),
+        )
+        .unwrap_err();
+        assert!(e.0.contains("space after each dash"), "{e:?}");
         let t2 = "lidi:\n  bogus: 1\nmodules:\n  m:\n    type: modbus\n    ip: 1.2.3.4\n    registers: [0-10]\n";
         assert!(load_text(t2).is_err());
     }
