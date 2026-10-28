@@ -888,6 +888,10 @@ pub struct Draft {
     pub modules: Vec<ModDraft>,
     pub key: KeyPlan,
     pub write_unit: bool,
+    /// This box's API address ("10.20.0.5:8443"); empty = no API.
+    pub api_listen: String,
+    /// api.in.listen / api.out.listen as imported.
+    pub api_imported: Vec<(String, String)>,
     /// The imported config.yaml, as read: kept underneath the answers.
     pub base: Mapping,
     pub imported_from: Option<PathBuf>,
@@ -911,6 +915,8 @@ impl Draft {
             modules: Vec::new(),
             key: KeyPlan::Later,
             write_unit: true,
+            api_listen: String::new(),
+            api_imported: Vec::new(),
             base: Mapping::new(),
             imported_from: None,
         }
@@ -975,6 +981,18 @@ impl Draft {
                     map,
                 });
             }
+        }
+        if let Some(Value::Mapping(api)) = raw.get("api") {
+            // Remembered for both sides; the wizard shows the one for this box.
+            d.api_imported = ["in", "out"]
+                .iter()
+                .filter_map(|s| {
+                    api.get(*s)
+                        .and_then(Value::as_mapping)
+                        .and_then(|m| m.get("listen"))
+                        .map(|v| ((*s).to_string(), scalar_text(v)))
+                })
+                .collect();
         }
         d.base = raw;
         d.imported_from = Some(path.to_path_buf());
@@ -1102,6 +1120,28 @@ impl Draft {
         let mut serial = sub(&mut doc, "serial");
         let logging = sub(&mut doc, "logging");
         let auth = sub(&mut doc, "auth");
+        let mut api = sub(&mut doc, "api");
+        if self.variant == Variant::V1 {
+            let side = self.side.as_str();
+            if self.api_listen.is_empty() {
+                api.remove(side);
+            } else {
+                // Keep options the wizard does not ask about (tokens, max_clients).
+                let mut mine = api
+                    .get(side)
+                    .and_then(Value::as_mapping)
+                    .cloned()
+                    .unwrap_or_default();
+                set(&mut mine, "listen", self.api_listen.clone().into());
+                if !mine.contains_key("tls") {
+                    let mut tls = Mapping::new();
+                    set(&mut tls, "cert", "api.crt".into());
+                    set(&mut tls, "key", "api.key".into());
+                    set(&mut mine, "tls", tls.into());
+                }
+                api.insert(side.into(), mine.into());
+            }
+        }
         let _ = sub(&mut doc, "modules");
         // Fixed order, the same as config.example.yaml; anything else the
         // imported file had stays after it.
@@ -1127,6 +1167,9 @@ impl Draft {
         }
         if !auth.is_empty() {
             out.insert("auth".into(), auth.into());
+        }
+        if !api.is_empty() {
+            out.insert("api".into(), api.into());
         }
         for (k, v) in rest {
             if !out.contains_key(&k) {
@@ -1290,6 +1333,17 @@ impl Draft {
                 KeyPlan::Later => {}
             }
         }
+        if self.variant == Variant::V1 && !self.api_listen.is_empty() {
+            if !env.etc.join("api.crt").exists() {
+                p.push(format!(
+                    "create a TLS certificate {} for the API",
+                    env.etc.join("api.crt").display()
+                ));
+            }
+            if crate::apitoken::list(&env.etc.join("api-tokens")).map_or(true, |t| t.is_empty()) {
+                p.push("create an API token \"monitoring\" (shown once, at the end)".into());
+            }
+        }
         if self.write_unit && env.write_unit {
             p.push(format!(
                 "write /etc/systemd/system/{}",
@@ -1370,6 +1424,34 @@ pub fn apply(d: &Draft, env: &Env) -> Result<Vec<String>, String> {
                 done.push(format!("created {}", key.display()));
             }
             KeyPlan::Keep | KeyPlan::Later => {}
+        }
+    }
+    if d.variant == Variant::V1 && !d.api_listen.is_empty() {
+        if !env.etc.join("api.crt").exists() {
+            let ip = d
+                .api_listen
+                .rsplit_once(':')
+                .map(|(h, _)| h.trim_matches(['[', ']']).to_string());
+            let host = std::fs::read_to_string("/etc/hostname")
+                .map(|s| s.trim().to_string())
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("dyode-{}", d.side.as_str()));
+            let c = crate::setup::make_api_cert(
+                &env.etc,
+                &host,
+                &ip.into_iter().collect::<Vec<_>>(),
+                825,
+                false,
+            )?;
+            done.push(format!("created {} ({})", c.cert.display(), c.fingerprint));
+        }
+        let tokens = env.etc.join("api-tokens");
+        if crate::apitoken::list(&tokens).map_or(true, |t| t.is_empty()) {
+            let t = crate::apitoken::add(&tokens, "monitoring", &["read".into()])?;
+            done.push(format!(
+                "API token \"monitoring\" (read), shown only now: {t}"
+            ));
         }
     }
     if d.write_unit && env.write_unit {

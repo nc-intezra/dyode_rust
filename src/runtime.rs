@@ -4,11 +4,12 @@
 use crate::config::{Config, ModuleKind, Side};
 use crate::envelope::Inbound;
 use crate::transport::{self, Lifecycle, ModuleLink, Uplink};
-use crate::{auth, folder, logstream, modbus, netutil, screen, serial, supervisor};
+use crate::{auth, folder, logstream, modbus, netutil, screen, serial, status, supervisor};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 fn banner(cfg: &Config, side: Side) {
+    crate::stats::init(cfg, side.as_str());
     log::info!(
         "DYODE {} ({} side), configuration {:?}, version {}, dated {}",
         env!("CARGO_PKG_VERSION"),
@@ -98,6 +99,19 @@ pub fn run_in(cfg: Config) -> ! {
             let n = net.clone();
             supervisor::spawn("arp-keeper", Box::new(move || netutil::run_arp_keeper(&n)));
         }
+        let status_link = ModuleLink::for_endpoint(
+            Arc::clone(&uplink),
+            transport::status_endpoint(&cfg),
+            transport::status_tag(),
+            key.clone(),
+            None,
+        );
+        let c = Arc::clone(&cfg);
+        supervisor::spawn(
+            "status",
+            Box::new(move || status::run_reporter(&c, Some(&status_link))),
+        );
+        start_api(&cfg, Side::In);
         supervisor::park_forever()
     })
 }
@@ -168,7 +182,18 @@ pub fn run_out(cfg: Config) -> ! {
             }
         };
         lifecycle.register(m, key.clone(), inbound);
+        if matches!(m.kind, ModuleKind::Folder(_)) {
+            // Its work happens in lidi's threads; there is no module
+            // thread to report it running.
+            crate::stats::module_started(&m.name);
+        }
     }
+    lifecycle.register_endpoint(
+        transport::status_endpoint(&cfg),
+        transport::status_tag(),
+        key.clone(),
+        Arc::new(status::StatusInbound::new()),
+    );
     let receiver = match transport::new_receiver(&cfg, lifecycle) {
         Ok(r) => &*Box::leak(Box::new(r)),
         Err(e) => {
@@ -176,6 +201,10 @@ pub fn run_out(cfg: Config) -> ! {
             std::process::exit(1);
         }
     };
+    let cfg = Arc::new(cfg);
+    let c = Arc::clone(&cfg);
+    supervisor::spawn("status", Box::new(move || status::run_reporter(&c, None)));
+    start_api(&cfg, Side::Out);
     std::thread::scope(|scope| {
         if let Err(e) = receiver.start(scope) {
             log::error!("cannot start lidi: {e}");
@@ -183,6 +212,25 @@ pub fn run_out(cfg: Config) -> ! {
         }
         supervisor::park_forever()
     })
+}
+
+/// The local API, when configured for this side (and built in).
+fn start_api(cfg: &Arc<Config>, side: Side) {
+    let Some(api) = cfg.api.for_side(side).cloned() else {
+        return;
+    };
+    #[cfg(feature = "api")]
+    {
+        let c = Arc::clone(cfg);
+        supervisor::spawn("api", Box::new(move || crate::api::serve(&c, side, &api)));
+    }
+    #[cfg(not(feature = "api"))]
+    {
+        let _ = api;
+        log::error!(
+            "an api: section is configured, but this dyode was built without the API (cargo feature \"api\")"
+        );
+    }
 }
 
 fn modbus_modules(cfg: &Config) -> Vec<(String, crate::config::ModbusConfig)> {

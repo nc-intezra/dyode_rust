@@ -18,6 +18,9 @@ StandardInput=null
 # Creates /var/log/dyode-transfer with the right mode before start.
 LogsDirectory=dyode-transfer
 LogsDirectoryMode=0750
+# /run/dyode: the status file read by 'dyode status'.
+RuntimeDirectory=dyode
+RuntimeDirectoryMode=0750
 # root is needed for the static ARP entry.
 User=root
 
