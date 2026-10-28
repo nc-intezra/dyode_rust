@@ -75,6 +75,9 @@ lidi parameters must match.
 | `dyode in` / `dyode out` | run the input / output side (v1, lidi) |
 | `dyode serial-in` / `serial-out` | run DYODE v2 (Modbus over serial) |
 | `dyode setup` | guided setup in dialog boxes (or `--plain` questions) |
+| `dyode status [--json]` | this box's status (and the input box's, on the output box) |
+| `dyode api-token add\|list\|revoke` | tokens for this box's local API ([docs/API.md](docs/API.md)) |
+| `dyode api-cert` | a self-signed TLS certificate for the local API |
 | `dyode new-key` | create the shared message key |
 | `dyode check` | validate config.yaml, the key and the installed unit; throughput hints |
 | `dyode lidi-config` | print the lidi parameters derived from config.yaml |

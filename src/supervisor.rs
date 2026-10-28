@@ -23,8 +23,10 @@ pub fn spawn(name: &str, task: Task) {
         .spawn(move || {
             loop {
                 log::info!("started module {name:?}");
+                crate::stats::module_started(&name);
                 let started = Instant::now();
                 let result = catch_unwind(AssertUnwindSafe(&*task));
+                crate::stats::module_stopped(&name);
                 match result {
                     Ok(Ok(())) => log::error!("module {name:?} exited"),
                     Ok(Err(e)) => log::error!("module {name:?} failed: {e}"),

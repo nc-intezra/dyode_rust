@@ -35,6 +35,14 @@ Setting up:
   systemd-unit  print a systemd unit:  --side in|out [--serial]
                 [--workdir DIR] [--binary PATH] [--interface IFACE] [-c FILE]
 
+Status and the local API (docs/API.md):
+  status        this box's status (and, on the output box, the input box's)
+                from /run/dyode:  [--json] [--side in|out]
+  api-token     tokens for this box's API:  add NAME [--scope read] |
+                list | revoke NAME   [-c FILE] [--side in|out]
+  api-cert      a self-signed TLS certificate for the API (needs openssl):
+                [--dir DIR] [--name HOST] [--ip ADDR]... [--days N] [--force]
+
 Logs:
   logs --archive [--dir DIR] [--keep-weeks N] [--dry-run]
   logs --stats   [--dir DIR] [--json NAME]
@@ -204,101 +212,25 @@ fn cmd_check(mut args: Args) {
             m.name
         );
     }
-    let mut warnings = unit_warnings(&cfg, side.as_deref(), serial);
     if serial {
         println!(
             "  serial: {} @ {} baud (v2: no key needed)",
             cfg.serial.device, cfg.serial.baudrate
         );
-        print_warnings(&warnings);
-        return;
     }
-    warnings.extend(throughput_hints(&cfg));
-    match auth::load_key(&cfg.auth) {
-        Ok(Some(_)) => println!("  key: {} OK", cfg.auth.key_file.display()),
-        Ok(None) => println!("  key: none (auth.required is false: NOT authenticated)"),
-        Err(e) => {
-            println!("  key: {e}");
-            exit(1);
-        }
+    let r = dyode::check::report(&cfg, side.as_deref(), serial);
+    for n in &r.notes {
+        println!("  {n}");
     }
-    if let Err(e) = transport::new_receiver_config_check(&cfg) {
-        println!("  lidi: {e}");
+    for e in &r.errors {
+        println!("  error: {e}");
+    }
+    for w in &r.warnings {
+        println!("  warning: {w}");
+    }
+    if !r.errors.is_empty() {
         exit(1);
     }
-    if side.as_deref() == Some("in") && cfg.network.out_mac.is_none() {
-        warnings.insert(
-            0,
-            "dyode_out.mac is not set: the input box cannot reach the output box through a diode"
-                .into(),
-        );
-    }
-    print_warnings(&warnings);
-}
-
-fn print_warnings(w: &[String]) {
-    for l in w {
-        println!("  warning: {l}");
-    }
-}
-
-/// Compare the installed systemd unit(s) with config.yaml: the side asked
-/// for, or every DYODE unit present.
-fn unit_warnings(cfg: &config::Config, side: Option<&str>, serial: bool) -> Vec<String> {
-    let dir = PathBuf::from(
-        std::env::var("DYODE_SYSTEMD_DIR").unwrap_or_else(|_| "/etc/systemd/system".into()),
-    );
-    let sides: Vec<Side> = match side {
-        Some("in") => vec![Side::In],
-        Some("out") => vec![Side::Out],
-        _ => vec![Side::In, Side::Out],
-    };
-    let mut w = Vec::new();
-    for s in sides {
-        let path = dir.join(setup::unit_name(s));
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let found = setup::check_unit(&text, s, cfg, serial);
-                if found.is_empty() {
-                    println!("  unit: {} matches", path.display());
-                }
-                w.extend(found);
-            }
-            Err(_) if side.is_some() => w.push(format!(
-                "{} is not installed: run install.sh (or dyode setup) to create it",
-                path.display()
-            )),
-            Err(_) => {}
-        }
-    }
-    w
-}
-
-/// Suggestions for using the box's cores, never errors.
-fn throughput_hints(cfg: &config::Config) -> Vec<String> {
-    let mut w = Vec::new();
-    let cpus = std::thread::available_parallelism().map_or(1, usize::from);
-    let suggested = dyode::wizard::model::suggested_ports(cpus);
-    if cfg.lidi.ports.len() < suggested {
-        let first = cfg.lidi.ports.first().copied().unwrap_or(5000);
-        w.push(format!(
-            "lidi uses {} port(s) on a {cpus}-CPU box: one RaptorQ thread per port.  For more throughput set \
-             lidi.ports: [{}] -- in the config of BOTH boxes, and only if the other box has the cores too",
-            cfg.lidi.ports.len(),
-            dyode::wizard::model::port_list(first, suggested)
-        ));
-    }
-    if let Some(m) = cfg.lidi.max_clients {
-        let need = cfg.concurrent_transfers();
-        if m < need {
-            w.push(format!(
-                "lidi.max_clients is {m}, but the modules can have {need} transfers in flight (parallel_files \
-                 included): transfers will wait for each other.  Remove max_clients to get {} automatically",
-                need + 2
-            ));
-        }
-    }
-    w
 }
 
 fn cmd_unit(mut args: Args) {
@@ -524,6 +456,184 @@ fn cmd_setup(mut args: Args) {
     }
 }
 
+fn cmd_status(mut args: Args) {
+    let json = args.flag(&["--json"]);
+    let side = args.value(&["--side"]);
+    args.done();
+    let sides: Vec<&str> = match side.as_deref() {
+        Some("in") => vec!["in"],
+        Some("out") => vec!["out"],
+        None => vec!["in", "out"],
+        Some(o) => die_usage(&format!("--side must be in or out, not {o:?}")),
+    };
+    let mut found = false;
+    for s in sides {
+        let path = dyode::stats::status_path(s);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        found = true;
+        let age = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map_or(0, |d| d.as_secs());
+        if json {
+            println!("{text}");
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) => {
+                print!("{}", dyode::stats::describe(&v));
+                if age > 90 {
+                    println!(
+                        "warning: {} is {age}s old: is dyode-{s} running?",
+                        path.display()
+                    );
+                }
+            }
+            Err(e) => eprintln!("{}: {e}", path.display()),
+        }
+    }
+    if !found {
+        eprintln!(
+            "no status in {}: DYODE is not running on this box (or not as root)",
+            dyode::stats::run_dir().display()
+        );
+        exit(1);
+    }
+}
+
+/// The token file of the side asked for, or of the only side configured.
+fn tokens_path(cfg: &config::Config, side: Option<String>) -> PathBuf {
+    let pick = |s: Side| cfg.api.for_side(s).map(|a| a.tokens.clone());
+    let found = match side.as_deref() {
+        Some("in") => pick(Side::In),
+        Some("out") => pick(Side::Out),
+        None => pick(Side::Out).or_else(|| pick(Side::In)),
+        Some(o) => die_usage(&format!("--side must be in or out, not {o:?}")),
+    };
+    found.unwrap_or_else(|| {
+        cfg.path
+            .canonicalize()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("api-tokens")))
+            .unwrap_or_else(|| PathBuf::from("api-tokens"))
+    })
+}
+
+fn cmd_api_token(mut args: Args) {
+    let cfg_path = args.value(&["-c", "--config"]);
+    let side = args.value(&["--side"]);
+    let scopes: Vec<String> = args
+        .value(&["--scope"])
+        .unwrap_or_else(|| "read".into())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+    if args.items.is_empty() {
+        die_usage("api-token needs add NAME, list or revoke NAME");
+    }
+    let action = args.items.remove(0);
+    let name = (!args.items.is_empty()).then(|| args.items.remove(0));
+    args.done();
+    logging::init(log::LevelFilter::Warn);
+    let cfg = load(cfg_path);
+    let path = tokens_path(&cfg, side);
+    match (action.as_str(), name) {
+        ("add", Some(n)) => match dyode::apitoken::add(&path, &n, &scopes) {
+            Ok(token) => {
+                println!("{token}");
+                eprintln!(
+                    "token {n:?} ({}) added to {}.  It is shown only now: store it in the client's secrets.",
+                    scopes.join(","),
+                    path.display()
+                );
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                exit(1);
+            }
+        },
+        ("list", None) => match dyode::apitoken::list(&path) {
+            Ok(t) if t.is_empty() => println!("no tokens in {}", path.display()),
+            Ok(t) => {
+                for tok in t {
+                    println!("{:<20} {}", tok.name, tok.scopes.join(","));
+                }
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                exit(1);
+            }
+        },
+        ("revoke", Some(n)) => match dyode::apitoken::revoke(&path, &n) {
+            Ok(true) => println!("revoked {n:?} in {}", path.display()),
+            Ok(false) => {
+                eprintln!("no token named {n:?} in {}", path.display());
+                exit(1);
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                exit(1);
+            }
+        },
+        _ => die_usage("api-token needs add NAME, list or revoke NAME"),
+    }
+}
+
+fn cmd_api_cert(mut args: Args) {
+    let dir = PathBuf::from(
+        args.value(&["--dir"])
+            .unwrap_or_else(|| "/etc/dyode".into()),
+    );
+    let mut ips = Vec::new();
+    while let Some(ip) = args.value(&["--ip"]) {
+        if ip.parse::<std::net::IpAddr>().is_err() {
+            die_usage(&format!("--ip {ip:?} is not an IP address"));
+        }
+        ips.push(ip);
+    }
+    let name = args.value(&["--name"]).unwrap_or_else(|| {
+        std::fs::read_to_string("/etc/hostname")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "dyode".into())
+    });
+    let days = args.value(&["--days"]).unwrap_or_else(|| "825".into());
+    if days.parse::<u32>().map_or(true, |d| d == 0) {
+        die_usage("--days needs a positive number");
+    }
+    let force = args.flag(&["--force"]);
+    args.done();
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-.".contains(c))
+    {
+        die_usage("--name must be a host name");
+    }
+    match setup::make_api_cert(&dir, &name, &ips, days.parse().unwrap_or(825), force) {
+        Ok(c) => {
+            println!(
+                "wrote {} and {} (valid {days} days, {})",
+                c.cert.display(),
+                c.key.display(),
+                c.names.join(", ")
+            );
+            println!("{}", c.fingerprint);
+            println!(
+                "Give clients this certificate (or pin the fingerprint), then set in config.yaml:"
+            );
+            println!(
+                "  api: {{<side>: {{listen: ADDRESS:8443, tls: {{cert: api.crt, key: api.key}}}}}}"
+            );
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            exit(1);
+        }
+    }
+}
+
 fn cmd_interfaces(mut args: Args) {
     let all = args.flag(&["--all"]);
     args.done();
@@ -623,6 +733,9 @@ fn main() {
         }
         "interfaces" => cmd_interfaces(args),
         "setup" => cmd_setup(args),
+        "status" => cmd_status(args),
+        "api-token" => cmd_api_token(args),
+        "api-cert" => cmd_api_cert(args),
         "firewall-rules" => {
             let p = args.value(&["-c", "--config"]);
             let iface_only = args.flag(&["--interface"]);

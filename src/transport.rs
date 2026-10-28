@@ -34,6 +34,21 @@ fn endpoint_label(index: u16) -> String {
     format!("unix:dyode-endpoint-{index}")
 }
 
+/// The lidi endpoint that carries the input box's status: the one after
+/// the last module, so both boxes agree on it from the same config.yaml.
+pub fn status_endpoint(cfg: &Config) -> u16 {
+    cfg.modules.len() as u16
+}
+
+/// Identifies status messages in their envelopes, as a module tag does.
+pub fn status_tag() -> [u8; 8] {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(b"dyode-module-v1\0status\0dyode-status");
+    let mut t = [0u8; 8];
+    t.copy_from_slice(&d[..8]);
+    t
+}
+
 /// The lidi TOML for this config (the same text on both boxes).
 ///
 /// It is what DYODE feeds to lidi's own configuration parser, and what
@@ -45,7 +60,9 @@ pub fn lidi_toml(cfg: &Config) -> String {
     let endpoints: Vec<String> = cfg
         .modules
         .iter()
-        .map(|m| format!("\"{}\"", endpoint_label(m.index)))
+        .map(|m| m.index)
+        .chain(std::iter::once(status_endpoint(cfg)))
+        .map(|i| format!("\"{}\"", endpoint_label(i)))
         .collect();
     let send_bind = l
         .send_bind
@@ -147,10 +164,21 @@ impl ModuleLink {
         key: Option<Vec<u8>>,
         mbps: Option<f64>,
     ) -> Self {
+        Self::for_endpoint(uplink, module.index, module.tag(), key, mbps)
+    }
+
+    /// A link for an endpoint that is not a module (the status channel).
+    pub fn for_endpoint(
+        uplink: Arc<Uplink>,
+        endpoint: u16,
+        module_tag: [u8; 8],
+        key: Option<Vec<u8>>,
+        mbps: Option<f64>,
+    ) -> Self {
         Self {
             uplink,
-            endpoint: module.index,
-            module_tag: module.tag(),
+            endpoint,
+            module_tag,
             sealer: Arc::new(Sealer::new(key)),
             pacer: mbps.map(|m| Arc::new(TokenBucket::from_mbps(m))),
         }
@@ -222,12 +250,22 @@ impl Lifecycle {
         key: Option<Vec<u8>>,
         inbound: Arc<dyn envelope::Inbound>,
     ) {
-        let label = PathBuf::from(endpoint_label(module.index).trim_start_matches("unix:"));
+        self.register_endpoint(module.index, module.tag(), key, inbound);
+    }
+
+    pub fn register_endpoint(
+        &mut self,
+        endpoint: u16,
+        module_tag: [u8; 8],
+        key: Option<Vec<u8>>,
+        inbound: Arc<dyn envelope::Inbound>,
+    ) {
+        let label = PathBuf::from(endpoint_label(endpoint).trim_start_matches("unix:"));
         self.by_label.insert(
             label,
             Arc::new(Registration {
-                endpoint: module.index,
-                module_tag: module.tag(),
+                endpoint,
+                module_tag,
                 inbound,
                 verifier: Mutex::new(Verifier::new(key)),
             }),
@@ -288,6 +326,7 @@ impl lidi_receive::ClientLifecycle for Lifecycle {
     ) -> Result<(), lidi_receive::Error> {
         if !ok {
             self.aborted.fetch_add(1, Ordering::Relaxed);
+            crate::stats::count("lidi_transfers_aborted");
         }
         // Dropping the parser settles the transfer: delivered if complete
         // and genuine, reported otherwise.
