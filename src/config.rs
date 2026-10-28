@@ -1606,7 +1606,7 @@ mod tests {
         assert_eq!(cfg.lidi.ports, vec![5001, 5002]);
         assert_eq!(cfg.lidi.max_mbps, None);
         assert_eq!(load_text(EXAMPLE).unwrap().lidi.max_mbps, Some(100.0));
-        assert_eq!(cfg.max_clients(), 3);
+        assert_eq!(cfg.max_clients(), 4);
         let e = parse(
             "lidi:\n  ports:\n    -5000\n    -5001\nmodules:\n  a: {type: folder, in: /a, out: /b}\n",
             Path::new("c.yaml"),
