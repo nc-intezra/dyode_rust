@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`dyode probe`**: measures a one-way link before video or files are
+  trusted to it (iperf3 needs a return channel).  It is meant for the
+  streaming hardware trials: wired diode, raw WiFi, SDR and LoRa.
+  - `probe send`: numbered, timestamped, CRC-checked UDP packets at a fixed
+    rate, one thread and port per stream.
+  - `probe recv`: the same ports, one thread each.  Reports loss,
+    burst-length and burst-duration histograms, a Gilbert-Elliott fit with
+    the `tc netem` line that replays it on the bench, delay and RFC 3550
+    jitter, and a RaptorQ what-if (`--fec-sim T:R`, what a span T and repair
+    ratio r would have left unrecovered).  It can also write a per-packet log
+    and a JSON report.
+  - `probe analyze`: replays a receive log.
+  - See [docs/PROBE.md](docs/PROBE.md).
+
 ## [2.0.2] - 2026-10-27
 
 ### Added

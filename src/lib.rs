@@ -15,6 +15,7 @@ pub mod logs_tool;
 pub mod logstream;
 pub mod modbus;
 pub mod netutil;
+pub mod probe;
 pub mod ratelimit;
 pub mod runtime;
 pub mod screen;
