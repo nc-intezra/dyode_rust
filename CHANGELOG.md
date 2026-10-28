@@ -1,32 +1,22 @@
 # Changelog
 
-## [2.1.0] - unreleased
+## [Unreleased]
 
 ### Added
 
-- **Local API** (phase 1, read-only; docs/API.md, docs/api/openapi.yaml):
-  `/v1/health`, `/v1/status`, `/metrics` (Prometheus), `/v1/check` and
-  `/v1/openapi.json` on each box's management network card, over TLS
-  (rustls, built in; cargo feature `api`, on by default), with per-box
-  bearer tokens.  It refuses to listen on the diode NIC.
-- **Status through the diode**: every `lidi.heartbeat` seconds the input
-  box sends its status (modules, restarts, event counts, bytes, free space,
-  static ARP entry, transport hash) on its own lidi endpoint, signed.  The
-  output box serves both boxes, warns when the input box goes silent or
-  runs a different configuration, and `dyode_status_age_seconds{side="in"}`
-  is the alert that catches a dead input box, diode or link.
-- `dyode status [--json]` (from /run/dyode, no API needed), `dyode
-  api-token add|list|revoke`, `dyode api-cert` (self-signed, via openssl).
-- Guided setup: a "Local API" screen that writes `api:`, makes the
-  certificate and a first token.
-- install.sh installs openssl when missing (also in the offline bundle);
-  the output box's nftables rules drop the API port on the diode NIC; the
-  units get `RuntimeDirectory=dyode`.
-
-### Changed
-
-- `lidi.max_clients` defaults to one more (the status channel).  Both boxes
-  must run 2.1.0.
+- **`dyode probe`**: measures a one-way link before video or files are
+  trusted to it (iperf3 needs a return channel).  It is meant for the
+  streaming hardware trials: wired diode, raw WiFi, SDR and LoRa.
+  - `probe send`: numbered, timestamped, CRC-checked UDP packets at a fixed
+    rate, one thread and port per stream.
+  - `probe recv`: the same ports, one thread each.  Reports loss,
+    burst-length and burst-duration histograms, a Gilbert-Elliott fit with
+    the `tc netem` line that replays it on the bench, delay and RFC 3550
+    jitter, and a RaptorQ what-if (`--fec-sim T:R`, what a span T and repair
+    ratio r would have left unrecovered).  It can also write a per-packet log
+    and a JSON report.
+  - `probe analyze`: replays a receive log.
+  - See [docs/PROBE.md](docs/PROBE.md).
 
 ## [2.0.2] - 2026-10-27
 

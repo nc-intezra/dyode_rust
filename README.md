@@ -85,6 +85,7 @@ lidi parameters must match.
 | `dyode systemd-unit --side in\|out` | print the systemd unit |
 | `dyode firewall-rules` | print the output box's nftables rules |
 | `dyode logs --archive` / `--stats` | weekly log archive / transfer statistics |
+| `dyode probe send` / `recv` / `analyze` | measure a one-way link: loss, bursts, delay, FEC what-if ([docs/PROBE.md](docs/PROBE.md)) |
 
 ## Logs
 
