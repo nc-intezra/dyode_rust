@@ -1,0 +1,183 @@
+openapi: 3.1.0
+info:
+  title: DYODE local API
+  version: 2.1.0
+  summary: Each DYODE box serves its own status on its own management network.
+  description: |
+    Phase 1, read-only.  The input box (OT) and the output box (IT) each run
+    this API on their management network card, never on the diode card.
+    Nothing here crosses the diode: the output box reports the input box
+    from the status message the input box sends through the diode every
+    `lidi.heartbeat` seconds.
+
+    Tokens are per box (`dyode api-token add NAME --scope read`) and are
+    sent as `Authorization: Bearer <token>`.  See docs/API.md.
+  license:
+    name: GPL-3.0
+servers:
+  - url: https://{address}:{port}
+    variables:
+      address: {default: 192.168.50.4, description: "api.<side>.listen address"}
+      port: {default: "8443"}
+security:
+  - bearer: []
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: A token from `dyode api-token add`, valid on this box only.
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
+    Module:
+      type: object
+      properties:
+        name: {type: string}
+        type: {type: string, enum: [folder, modbus, screen, logs]}
+        endpoint: {type: integer, description: lidi endpoint id (position in config.yaml)}
+        state: {type: string, enum: [starting, running, restarting]}
+        restarts: {type: integer}
+        last_activity: {type: [string, "null"], format: date-time}
+        events:
+          type: object
+          additionalProperties: {type: integer}
+          description: transfer.jsonl events counted since start, by event name.
+        bytes_sent: {type: integer}
+        bytes_stored: {type: integer}
+        free:
+          type: array
+          items:
+            type: object
+            properties:
+              dir: {type: string}
+              path: {type: string}
+              free_bytes: {type: integer}
+    BoxStatus:
+      type: object
+      properties:
+        side: {type: string, enum: [in, out]}
+        version: {type: string}
+        config_name: {type: string}
+        transport_hash:
+          type: string
+          description: Hash of what both boxes must agree on (lidi parameters, module names and types).
+        time: {type: string, format: date-time}
+        uptime_s: {type: integer}
+        status_age_s:
+          type: number
+          description: 0 for the box answering; for the input box seen from the output box, seconds since its status arrived.
+        received: {type: string, format: date-time}
+        static_arp_ok: {type: boolean}
+        modules:
+          type: array
+          items: {$ref: "#/components/schemas/Module"}
+        counters:
+          type: object
+          additionalProperties: {type: integer}
+          description: Box-wide counters (lidi_transfers_aborted, api_refused, api_busy, ...).
+    Status:
+      type: object
+      required: [boxes, warnings]
+      properties:
+        boxes:
+          type: object
+          properties:
+            in:
+              oneOf: [{$ref: "#/components/schemas/BoxStatus"}, {type: "null"}]
+            out: {$ref: "#/components/schemas/BoxStatus"}
+        warnings:
+          type: array
+          items: {type: string}
+    Check:
+      type: object
+      properties:
+        notes: {type: array, items: {type: string}}
+        errors: {type: array, items: {type: string}}
+        warnings: {type: array, items: {type: string}}
+  responses:
+    Unauthorized:
+      description: No token, or an unknown one.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Forbidden:
+      description: The token lacks the read scope.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+paths:
+  /v1/health:
+    get:
+      summary: Is DYODE up on this box?
+      security: []
+      responses:
+        "200":
+          description: Up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, const: ok}
+                  side: {type: string, enum: [in, out]}
+                  version: {type: string}
+                  uptime_s: {type: integer}
+  /v1/status:
+    get:
+      summary: Status of this box and, on the output box, of the input box.
+      description: |
+        On the output box, `boxes.in` is the input box's last status as
+        received through the diode, with `status_age_s`.  It is `null` until
+        the first one arrives.  `warnings` names a silent input box (no
+        status for 3 heartbeats) and differing configurations.
+      responses:
+        "200":
+          description: Status.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Status"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+  /metrics:
+    get:
+      summary: Prometheus metrics for this box (and the input box, on the output box).
+      description: |
+        dyode_info, dyode_status_age_seconds, dyode_status_received,
+        dyode_uptime_seconds, dyode_config_match, dyode_module_up,
+        dyode_module_restarts_total, dyode_events_total,
+        dyode_bytes_total, dyode_last_activity_timestamp_seconds,
+        dyode_free_bytes, dyode_counter_total, dyode_static_arp_ok.
+        Every series carries side="in" or side="out".
+      responses:
+        "200":
+          description: Prometheus text exposition format 0.0.4.
+          content:
+            text/plain:
+              schema: {type: string}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+  /v1/check:
+    get:
+      summary: "`dyode check` for this box, as JSON."
+      responses:
+        "200":
+          description: Notes, errors and warnings.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Check"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+  /v1/openapi.json:
+    get:
+      summary: This description, as JSON.
+      security: []
+      responses:
+        "200":
+          description: OpenAPI 3.1 document.
+          content:
+            application/json:
+              schema: {type: object}

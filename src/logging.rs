@@ -259,6 +259,8 @@ impl Event {
     }
 
     pub fn emit(self) {
+        // Counted even when per-file records are not written.
+        crate::stats::on_event(self.name, self.module.as_deref(), &self.fields);
         let mut ev = EVENTS.lock().unwrap();
         if self.per_file && !ev.per_file_events {
             return;

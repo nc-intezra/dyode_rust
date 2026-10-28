@@ -140,6 +140,9 @@ pub fn systemd_unit_text(
         "# Creates /var/log/dyode-transfer with the right mode before start.".into(),
         "LogsDirectory=dyode-transfer".into(),
         "LogsDirectoryMode=0750".into(),
+        "# /run/dyode: the status file read by 'dyode status'.".into(),
+        "RuntimeDirectory=dyode".into(),
+        "RuntimeDirectoryMode=0750".into(),
         format!("# root is needed for {reason}."),
         "User=root".into(),
         String::new(),
@@ -223,6 +226,99 @@ pub fn check_unit(
     w
 }
 
+pub struct ApiCert {
+    pub cert: std::path::PathBuf,
+    pub key: std::path::PathBuf,
+    pub names: Vec<String>,
+    /// As openssl prints it: "sha256 Fingerprint=AB:CD:...".
+    pub fingerprint: String,
+}
+
+/// A self-signed TLS certificate for the local API, made with openssl
+/// (present on every supported system): api.crt and api.key in `dir`.
+pub fn make_api_cert(
+    dir: &Path,
+    name: &str,
+    ips: &[String],
+    days: u32,
+    force: bool,
+) -> Result<ApiCert, String> {
+    use std::process::{Command, Stdio};
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-.".contains(c))
+    {
+        return Err(format!("{name:?} is not a host name"));
+    }
+    for ip in ips {
+        if ip.parse::<std::net::IpAddr>().is_err() {
+            return Err(format!("{ip:?} is not an IP address"));
+        }
+    }
+    let (crt, key) = (dir.join("api.crt"), dir.join("api.key"));
+    if !force && (crt.exists() || key.exists()) {
+        return Err(format!(
+            "{} or {} exists; --force replaces them",
+            crt.display(),
+            key.display()
+        ));
+    }
+    fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let mut names = vec![format!("DNS:{name}")];
+    names.extend(ips.iter().map(|i| format!("IP:{i}")));
+    let out = Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:P-256",
+            "-nodes",
+        ])
+        .arg("-keyout")
+        .arg(&key)
+        .arg("-out")
+        .arg(&crt)
+        .args([
+            "-days",
+            &days.to_string(),
+            "-subj",
+            &format!("/CN={name}/O=DYODE"),
+        ])
+        .args(["-addext", &format!("subjectAltName={}", names.join(","))])
+        .args(["-addext", "basicConstraints=critical,CA:FALSE"])
+        .args(["-addext", "keyUsage=critical,digitalSignature"])
+        .args(["-addext", "extendedKeyUsage=serverAuth"])
+        .stdout(Stdio::null())
+        .output()
+        .map_err(|e| {
+            format!("cannot run openssl ({e}): install it, or use a certificate from your CA")
+        })?;
+    if !out.status.success() {
+        return Err(format!(
+            "openssl failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(&key, fs::Permissions::from_mode(0o600));
+    let fingerprint = Command::new("openssl")
+        .args(["x509", "-noout", "-fingerprint", "-sha256", "-in"])
+        .arg(&crt)
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    Ok(ApiCert {
+        cert: crt,
+        key,
+        names,
+        fingerprint,
+    })
+}
+
 /// Copy a key file after checking it, readable by root only.
 pub fn install_key_copy(source: &Path, dest: &Path) -> Result<(), String> {
     crate::auth::read_key_file(source).map_err(|e| e.to_string())?;
@@ -265,6 +361,12 @@ pub fn firewall_rules(cfg: &crate::config::Config) -> Result<String, String> {
         .collect::<Vec<_>>()
         .join(", ");
     let in_ip = cfg.network.in_ip;
+    let api_rule = cfg.api.output.as_ref().map_or(String::new(), |a| {
+        format!(
+            "\t\ttcp dport {} iifname \"{iface}\" counter drop comment \"DYODE: the API never on the diode NIC\"\n",
+            a.listen.port()
+        )
+    });
     Ok(format!(
         "# Managed by DYODE install.sh (rewritten on each run; --no-firewall to skip).\n\
          # Diode ports {plist}: accepted only on {iface} from the input box {in_ip}.\n\
@@ -277,6 +379,7 @@ pub fn firewall_rules(cfg: &crate::config::Config) -> Result<String, String> {
          \t\tmeta nfproto ipv6 udp dport {{ {plist} }} counter drop comment \"DYODE: diode ports are IPv4 only\"\n\
          \t\tudp dport {{ {plist} }} iifname != \"{iface}\" counter drop comment \"DYODE: diode ports only on the diode NIC\"\n\
          \t\tudp dport {{ {plist} }} ip saddr != {in_ip} counter drop comment \"DYODE: diode ports only from the input box\"\n\
+         {api_rule}\
          \t}}\n\
          }}\n"
     ))

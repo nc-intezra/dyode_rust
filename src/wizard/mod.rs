@@ -52,6 +52,8 @@ enum Step {
     Baud,
     Modules,
     Key,
+    Api,
+    ApiAddr,
     Unit,
     Review,
 }
@@ -181,6 +183,7 @@ impl<U: Ui> Wizard<'_, U> {
         v.push(Modules);
         if self.d.variant == model::Variant::V1 {
             v.push(Key);
+            v.push(Api);
         }
         if self.env.write_unit {
             v.push(Unit);
@@ -198,6 +201,7 @@ impl<U: Ui> Wizard<'_, U> {
     fn major_of(s: Step) -> Step {
         match s {
             Step::ImportPath => Step::Start,
+            Step::ApiAddr => Step::Api,
             Step::IfaceManual => Step::Iface,
             Step::PeerIp | Step::PeerMac | Step::PeerIface => Step::Peer,
             Step::PortsManual => Step::Ports,
@@ -251,6 +255,7 @@ impl<U: Ui> Wizard<'_, U> {
                 Step::Start
             }),
             Step::Unit if !self.env.write_unit => Some(Step::Review),
+            Step::Api | Step::ApiAddr if self.d.variant == Variant::V2 => Some(Step::Unit),
             Step::PeerMac if self.d.side == Side::Out => Some(Step::PeerIface),
             _ => None,
         }
@@ -757,6 +762,80 @@ impl<U: Ui> Wizard<'_, U> {
             }
             Step::Modules => self.modules(),
             Step::Key => self.key(),
+            Step::Api => {
+                let side = self.d.side.as_str();
+                if self.d.api_listen.is_empty() {
+                    if let Some((_, l)) = self.d.api_imported.iter().find(|(s, _)| s == side) {
+                        self.d.api_listen = l.clone();
+                    }
+                }
+                let opts = [
+                    Opt::new("Off", "no API on this box"),
+                    Opt::new("On", "HTTPS on the management network card, with tokens"),
+                ];
+                let body = vec![
+                    "The local API serves this box's status and Prometheus metrics, for Prometheus or Zabbix. \
+                     On the output box it covers the input box too, from the status it sends through the diode."
+                        .into(),
+                    "It listens on the management network card, never the diode card. A TLS certificate and a \
+                     first token are created when you write the configuration."
+                        .into(),
+                ];
+                let def = usize::from(!self.d.api_listen.is_empty());
+                self.ui.choose("Local API", &body, &opts, def).map(|i| {
+                    if i == 0 {
+                        self.d.api_listen.clear();
+                        Step::Unit
+                    } else {
+                        Step::ApiAddr
+                    }
+                })
+            }
+            Step::ApiAddr => {
+                let me = self.d.my_iface().to_string();
+                let my_ip = self.d.my_ip().to_string();
+                let def = if self.d.api_listen.is_empty() {
+                    env.interfaces
+                        .iter()
+                        .filter(|i| i.name != me)
+                        .find_map(|i| {
+                            i.ipv4
+                                .as_deref()
+                                .map(|a| a.split('/').next().unwrap_or(a).to_string())
+                        })
+                        .map_or_else(String::new, |a| format!("{a}:8443"))
+                } else {
+                    self.d.api_listen.clone()
+                };
+                let check = move |s: &str| -> Result<(), String> {
+                    let a: std::net::SocketAddr = s
+                        .parse()
+                        .map_err(|_| "address:port, like 192.168.50.4:8443".to_string())?;
+                    if a.ip().is_unspecified() {
+                        return Err(
+                            "one address, not 0.0.0.0: that would include the diode card".into(),
+                        );
+                    }
+                    if a.ip().to_string() == my_ip {
+                        return Err(
+                            "that is this box's diode address; use the management card's".into(),
+                        );
+                    }
+                    Ok(())
+                };
+                let body = vec![
+                    format!(
+                        "The address and port to listen on. This box's diode card is {me}; the API must not use it."
+                    ),
+                    "Prometheus and Zabbix connect here.".into(),
+                ];
+                self.ui
+                    .text("Local API address", &body, "Address:port", &def, &check)
+                    .map(|v| {
+                        self.d.api_listen = v;
+                        Step::Unit
+                    })
+            }
             Step::Unit => {
                 let unit = crate::setup::unit_name(self.d.side);
                 let body = vec![
@@ -1183,7 +1262,7 @@ impl<U: Ui> Wizard<'_, U> {
         ];
         self.ui.choose("Message key", &body, &opts, def).map(|i| {
             self.d.key = plans[i];
-            Step::Unit
+            Step::Api
         })
     }
 
@@ -1228,6 +1307,13 @@ impl<U: Ui> Wizard<'_, U> {
                 "serial: {} at {} baud",
                 d.serial_device, d.baudrate
             )));
+        }
+        if d.variant == Variant::V1 {
+            lines.push(Line::Text(if d.api_listen.is_empty() {
+                "API: off".to_string()
+            } else {
+                format!("API: https://{}", d.api_listen)
+            }));
         }
         for (i, m) in d.modules.iter().enumerate() {
             lines.push(Line::Text(format!(
@@ -1358,7 +1444,7 @@ mod tests {
     const FULL: &str = "enter enter enter enter ctrl-u 'Line 3' enter enter enter enter enter \
                         'b8:27:eb:b1:ff:ab' enter enter enter enter enter enter enter enter enter \
                         down down enter '5' enter enter \
-                        enter enter enter enter";
+                        enter enter enter enter enter";
 
     #[test]
     fn full_run_writes_a_config_dyode_accepts() {
@@ -1376,6 +1462,41 @@ mod tests {
         };
         assert_eq!(f.settle, 5.0);
         assert!(dir.path().join("dyode.key").is_file());
+    }
+
+    #[test]
+    fn api_on_writes_listen_cert_and_token() {
+        if std::process::Command::new("openssl")
+            .arg("version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = crate::testutil::TempDir::new();
+        // As FULL, but "On" at the API screen, then an address on wlan0's
+        // network (the demo box's management card).
+        let script = "enter enter enter enter ctrl-u 'Line 3' enter enter enter enter enter \
+                      'b8:27:eb:b1:ff:ab' enter enter enter enter enter enter enter enter enter \
+                      enter enter enter down enter ctrl-u '192.168.1.23:8443' enter enter enter enter";
+        let (out, frames) = run_script(script, dir.path(), Preset::default());
+        let Outcome::Written { done, .. } = out else {
+            panic!("did not finish: {}", frames.last().unwrap())
+        };
+        let cfg = crate::config::load(&dir.path().join("config.yaml")).unwrap();
+        let api = cfg.api.input.expect("api.in");
+        assert_eq!(api.listen.to_string(), "192.168.1.23:8443");
+        assert!(dir.path().join("api.crt").is_file() && dir.path().join("api.key").is_file());
+        let line = done
+            .iter()
+            .find(|l| l.contains("shown only now"))
+            .expect("token line");
+        let token = line.rsplit(' ').next().unwrap();
+        let tokens = crate::apitoken::list(&dir.path().join("api-tokens")).unwrap();
+        assert_eq!(
+            crate::apitoken::verify(&tokens, token).unwrap().name,
+            "monitoring"
+        );
     }
 
     #[test]
@@ -1430,7 +1551,8 @@ mod tests {
         env.dry_run = false;
         env.write_unit = false;
         // v1, out side: the out box's MAC comes from its own card.
-        let answers = "\n1\n2\n1\nPiped\n1\n10.0.1.2\n\n\n\n\n\n1\n1\n\n/srv/a\n/srv/b\n\n\n1\n\n";
+        let answers =
+            "\n1\n2\n1\nPiped\n1\n10.0.1.2\n\n\n\n\n\n1\n1\n\n/srv/a\n/srv/b\n\n\n1\n\n\n";
         let mut out = Vec::new();
         let res = run(
             &mut ui::PlainUi::new(answers.as_bytes(), &mut out),

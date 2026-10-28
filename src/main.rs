@@ -1,7 +1,7 @@
 //! The `dyode` command.
 
 use dyode::config::{self, Side};
-use dyode::{auth, logging, logs_tool, runtime, setup, timefmt, transport};
+use dyode::{auth, logging, logs_tool, probe, runtime, setup, timefmt, transport};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
@@ -34,6 +34,19 @@ Setting up:
                 from the input box, only on the diode NIC)  [-c FILE]
   systemd-unit  print a systemd unit:  --side in|out [--serial]
                 [--workdir DIR] [--binary PATH] [--interface IFACE] [-c FILE]
+
+Measuring a link (trial runs; see docs/PROBE.md):
+  probe send    numbered, timestamped UDP at a fixed rate, one thread and
+                port per stream:  --to HOST:PORT [--streams N]
+                [--mbps X | --pps N] [--size BYTES] [--duration S | --count N]
+                [--burst N] [--bind IP] [--sndbuf BYTES] [--json FILE]
+  probe recv    loss, burst lengths, Gilbert-Elliott fit (netem line), delay,
+                jitter and RaptorQ what-if per stream:  [--listen IP:PORT]
+                [--streams N] [--idle S] [--duration S] [--report S]
+                [--reorder-ms MS] [--fec-sim T:R,...|none] [--rcvbuf BYTES]
+                [--keep] [--log FILE] [--json FILE] [--quiet]
+  probe analyze LOG  replay a recv --log file  [--reorder-ms MS]
+                [--fec-sim T:R,...] [--json FILE]
 
 Logs:
   logs --archive [--dir DIR] [--keep-weeks N] [--dry-run]
@@ -204,101 +217,25 @@ fn cmd_check(mut args: Args) {
             m.name
         );
     }
-    let mut warnings = unit_warnings(&cfg, side.as_deref(), serial);
     if serial {
         println!(
             "  serial: {} @ {} baud (v2: no key needed)",
             cfg.serial.device, cfg.serial.baudrate
         );
-        print_warnings(&warnings);
-        return;
     }
-    warnings.extend(throughput_hints(&cfg));
-    match auth::load_key(&cfg.auth) {
-        Ok(Some(_)) => println!("  key: {} OK", cfg.auth.key_file.display()),
-        Ok(None) => println!("  key: none (auth.required is false: NOT authenticated)"),
-        Err(e) => {
-            println!("  key: {e}");
-            exit(1);
-        }
+    let r = dyode::check::report(&cfg, side.as_deref(), serial);
+    for n in &r.notes {
+        println!("  {n}");
     }
-    if let Err(e) = transport::new_receiver_config_check(&cfg) {
-        println!("  lidi: {e}");
+    for e in &r.errors {
+        println!("  error: {e}");
+    }
+    for w in &r.warnings {
+        println!("  warning: {w}");
+    }
+    if !r.errors.is_empty() {
         exit(1);
     }
-    if side.as_deref() == Some("in") && cfg.network.out_mac.is_none() {
-        warnings.insert(
-            0,
-            "dyode_out.mac is not set: the input box cannot reach the output box through a diode"
-                .into(),
-        );
-    }
-    print_warnings(&warnings);
-}
-
-fn print_warnings(w: &[String]) {
-    for l in w {
-        println!("  warning: {l}");
-    }
-}
-
-/// Compare the installed systemd unit(s) with config.yaml: the side asked
-/// for, or every DYODE unit present.
-fn unit_warnings(cfg: &config::Config, side: Option<&str>, serial: bool) -> Vec<String> {
-    let dir = PathBuf::from(
-        std::env::var("DYODE_SYSTEMD_DIR").unwrap_or_else(|_| "/etc/systemd/system".into()),
-    );
-    let sides: Vec<Side> = match side {
-        Some("in") => vec![Side::In],
-        Some("out") => vec![Side::Out],
-        _ => vec![Side::In, Side::Out],
-    };
-    let mut w = Vec::new();
-    for s in sides {
-        let path = dir.join(setup::unit_name(s));
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let found = setup::check_unit(&text, s, cfg, serial);
-                if found.is_empty() {
-                    println!("  unit: {} matches", path.display());
-                }
-                w.extend(found);
-            }
-            Err(_) if side.is_some() => w.push(format!(
-                "{} is not installed: run install.sh (or dyode setup) to create it",
-                path.display()
-            )),
-            Err(_) => {}
-        }
-    }
-    w
-}
-
-/// Suggestions for using the box's cores, never errors.
-fn throughput_hints(cfg: &config::Config) -> Vec<String> {
-    let mut w = Vec::new();
-    let cpus = std::thread::available_parallelism().map_or(1, usize::from);
-    let suggested = dyode::wizard::model::suggested_ports(cpus);
-    if cfg.lidi.ports.len() < suggested {
-        let first = cfg.lidi.ports.first().copied().unwrap_or(5000);
-        w.push(format!(
-            "lidi uses {} port(s) on a {cpus}-CPU box: one RaptorQ thread per port.  For more throughput set \
-             lidi.ports: [{}] -- in the config of BOTH boxes, and only if the other box has the cores too",
-            cfg.lidi.ports.len(),
-            dyode::wizard::model::port_list(first, suggested)
-        ));
-    }
-    if let Some(m) = cfg.lidi.max_clients {
-        let need = cfg.concurrent_transfers();
-        if m < need {
-            w.push(format!(
-                "lidi.max_clients is {m}, but the modules can have {need} transfers in flight (parallel_files \
-                 included): transfers will wait for each other.  Remove max_clients to get {} automatically",
-                need + 2
-            ));
-        }
-    }
-    w
 }
 
 fn cmd_unit(mut args: Args) {
@@ -524,6 +461,184 @@ fn cmd_setup(mut args: Args) {
     }
 }
 
+fn cmd_status(mut args: Args) {
+    let json = args.flag(&["--json"]);
+    let side = args.value(&["--side"]);
+    args.done();
+    let sides: Vec<&str> = match side.as_deref() {
+        Some("in") => vec!["in"],
+        Some("out") => vec!["out"],
+        None => vec!["in", "out"],
+        Some(o) => die_usage(&format!("--side must be in or out, not {o:?}")),
+    };
+    let mut found = false;
+    for s in sides {
+        let path = dyode::stats::status_path(s);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        found = true;
+        let age = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map_or(0, |d| d.as_secs());
+        if json {
+            println!("{text}");
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) => {
+                print!("{}", dyode::stats::describe(&v));
+                if age > 90 {
+                    println!(
+                        "warning: {} is {age}s old: is dyode-{s} running?",
+                        path.display()
+                    );
+                }
+            }
+            Err(e) => eprintln!("{}: {e}", path.display()),
+        }
+    }
+    if !found {
+        eprintln!(
+            "no status in {}: DYODE is not running on this box (or not as root)",
+            dyode::stats::run_dir().display()
+        );
+        exit(1);
+    }
+}
+
+/// The token file of the side asked for, or of the only side configured.
+fn tokens_path(cfg: &config::Config, side: Option<String>) -> PathBuf {
+    let pick = |s: Side| cfg.api.for_side(s).map(|a| a.tokens.clone());
+    let found = match side.as_deref() {
+        Some("in") => pick(Side::In),
+        Some("out") => pick(Side::Out),
+        None => pick(Side::Out).or_else(|| pick(Side::In)),
+        Some(o) => die_usage(&format!("--side must be in or out, not {o:?}")),
+    };
+    found.unwrap_or_else(|| {
+        cfg.path
+            .canonicalize()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("api-tokens")))
+            .unwrap_or_else(|| PathBuf::from("api-tokens"))
+    })
+}
+
+fn cmd_api_token(mut args: Args) {
+    let cfg_path = args.value(&["-c", "--config"]);
+    let side = args.value(&["--side"]);
+    let scopes: Vec<String> = args
+        .value(&["--scope"])
+        .unwrap_or_else(|| "read".into())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+    if args.items.is_empty() {
+        die_usage("api-token needs add NAME, list or revoke NAME");
+    }
+    let action = args.items.remove(0);
+    let name = (!args.items.is_empty()).then(|| args.items.remove(0));
+    args.done();
+    logging::init(log::LevelFilter::Warn);
+    let cfg = load(cfg_path);
+    let path = tokens_path(&cfg, side);
+    match (action.as_str(), name) {
+        ("add", Some(n)) => match dyode::apitoken::add(&path, &n, &scopes) {
+            Ok(token) => {
+                println!("{token}");
+                eprintln!(
+                    "token {n:?} ({}) added to {}.  It is shown only now: store it in the client's secrets.",
+                    scopes.join(","),
+                    path.display()
+                );
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                exit(1);
+            }
+        },
+        ("list", None) => match dyode::apitoken::list(&path) {
+            Ok(t) if t.is_empty() => println!("no tokens in {}", path.display()),
+            Ok(t) => {
+                for tok in t {
+                    println!("{:<20} {}", tok.name, tok.scopes.join(","));
+                }
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                exit(1);
+            }
+        },
+        ("revoke", Some(n)) => match dyode::apitoken::revoke(&path, &n) {
+            Ok(true) => println!("revoked {n:?} in {}", path.display()),
+            Ok(false) => {
+                eprintln!("no token named {n:?} in {}", path.display());
+                exit(1);
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                exit(1);
+            }
+        },
+        _ => die_usage("api-token needs add NAME, list or revoke NAME"),
+    }
+}
+
+fn cmd_api_cert(mut args: Args) {
+    let dir = PathBuf::from(
+        args.value(&["--dir"])
+            .unwrap_or_else(|| "/etc/dyode".into()),
+    );
+    let mut ips = Vec::new();
+    while let Some(ip) = args.value(&["--ip"]) {
+        if ip.parse::<std::net::IpAddr>().is_err() {
+            die_usage(&format!("--ip {ip:?} is not an IP address"));
+        }
+        ips.push(ip);
+    }
+    let name = args.value(&["--name"]).unwrap_or_else(|| {
+        std::fs::read_to_string("/etc/hostname")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "dyode".into())
+    });
+    let days = args.value(&["--days"]).unwrap_or_else(|| "825".into());
+    if days.parse::<u32>().map_or(true, |d| d == 0) {
+        die_usage("--days needs a positive number");
+    }
+    let force = args.flag(&["--force"]);
+    args.done();
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-.".contains(c))
+    {
+        die_usage("--name must be a host name");
+    }
+    match setup::make_api_cert(&dir, &name, &ips, days.parse().unwrap_or(825), force) {
+        Ok(c) => {
+            println!(
+                "wrote {} and {} (valid {days} days, {})",
+                c.cert.display(),
+                c.key.display(),
+                c.names.join(", ")
+            );
+            println!("{}", c.fingerprint);
+            println!(
+                "Give clients this certificate (or pin the fingerprint), then set in config.yaml:"
+            );
+            println!(
+                "  api: {{<side>: {{listen: ADDRESS:8443, tls: {{cert: api.crt, key: api.key}}}}}}"
+            );
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            exit(1);
+        }
+    }
+}
+
 fn cmd_interfaces(mut args: Args) {
     let all = args.flag(&["--all"]);
     args.done();
@@ -601,6 +716,254 @@ fn cmd_logs(mut args: Args) {
     }
 }
 
+fn num<T: std::str::FromStr>(name: &str, v: Option<String>) -> Option<T> {
+    v.map(|t| {
+        t.parse::<T>()
+            .unwrap_or_else(|_| die_usage(&format!("{name}: bad value {t:?}")))
+    })
+}
+
+fn secs(name: &str, v: Option<String>) -> Option<std::time::Duration> {
+    num::<f64>(name, v).map(|s| {
+        if !(s.is_finite() && s >= 0.0) {
+            die_usage(&format!("{name} must be zero or more seconds"));
+        }
+        std::time::Duration::from_secs_f64(s)
+    })
+}
+
+fn sock_addr(name: &str, text: &str) -> std::net::SocketAddr {
+    use std::net::ToSocketAddrs;
+    text.to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+        .unwrap_or_else(|| die_usage(&format!("{name}: {text:?} is not HOST:PORT")))
+}
+
+fn fec_list(v: Option<String>) -> Vec<probe::FecSpec> {
+    match v.as_deref() {
+        None => probe::FecSpec::defaults(),
+        Some("none") => Vec::new(),
+        Some(t) => probe::FecSpec::parse_list(t).unwrap_or_else(|e| die_usage(&e)),
+    }
+}
+
+fn write_json(path: Option<String>, value: &serde_json::Value) {
+    if let Some(p) = path {
+        let text = serde_json::to_string_pretty(value).unwrap_or_default();
+        if let Err(e) = std::fs::write(&p, text + "\n") {
+            eprintln!("cannot write {p}: {e}");
+            exit(1);
+        }
+        println!("wrote {p}");
+    }
+}
+
+fn cmd_probe(mut args: Args) {
+    if args.items.is_empty() {
+        die_usage("probe needs send, recv or analyze");
+    }
+    let sub = args.items.remove(0);
+    match sub.as_str() {
+        "send" => probe_send(args),
+        "recv" | "receive" => probe_recv(args),
+        "analyze" | "analyse" => probe_analyze(args),
+        other => die_usage(&format!(
+            "unknown probe command {other:?} (send, recv or analyze)"
+        )),
+    }
+}
+
+fn probe_send(mut args: Args) {
+    let to = args
+        .value(&["--to"])
+        .unwrap_or_else(|| die_usage("probe send needs --to HOST:PORT"));
+    let to = sock_addr("--to", &to);
+    let bind = num::<std::net::IpAddr>("--bind", args.value(&["--bind"]));
+    let streams = num::<u16>("--streams", args.value(&["--streams"]))
+        .unwrap_or(1)
+        .max(1);
+    let size = num::<usize>("--size", args.value(&["--size"])).unwrap_or(1316);
+    let mbps = num::<f64>("--mbps", args.value(&["--mbps"]));
+    let pps = num::<f64>("--pps", args.value(&["--pps"]));
+    let count = num::<u64>("--count", args.value(&["--count"]));
+    let duration = secs("--duration", args.value(&["--duration"]));
+    let burst = num::<u32>("--burst", args.value(&["--burst"]))
+        .unwrap_or(1)
+        .max(1);
+    let sndbuf = num::<usize>("--sndbuf", args.value(&["--sndbuf"]));
+    let json = args.value(&["--json"]);
+    args.done();
+    if mbps.is_some() && pps.is_some() {
+        die_usage("give --mbps or --pps, not both");
+    }
+    if count.is_some() && duration.is_some() {
+        die_usage("give --duration or --count, not both");
+    }
+    let total_pps = match (mbps, pps) {
+        (_, Some(p)) => p,
+        (m, None) => m.unwrap_or(10.0) * 1e6 / 8.0 / size as f64,
+    };
+    let duration = if count.is_none() {
+        Some(duration.unwrap_or(std::time::Duration::from_secs(10)))
+    } else {
+        None
+    };
+    let opts = probe::SendOptions {
+        to,
+        bind,
+        streams,
+        pps: total_pps / f64::from(streams),
+        size,
+        duration,
+        count,
+        burst,
+        sndbuf,
+    };
+    let last = to.port() as u32 + u32::from(streams) - 1;
+    let ports = if streams > 1 {
+        format!("{}-{last}", to.port())
+    } else {
+        to.port().to_string()
+    };
+    let how_long = match (count, duration) {
+        (Some(c), _) => format!("{c} packets per stream"),
+        (None, Some(d)) => format!("{:.1} s", d.as_secs_f64()),
+        _ => String::new(),
+    };
+    println!(
+        "probe: {streams} stream(s) to {}:{ports}, {size}-byte packets, {:.1} pkt/s per stream ({:.3} Mbit/s total), {how_long}",
+        to.ip(),
+        opts.pps,
+        total_pps * size as f64 * 8.0 / 1e6
+    );
+    probe::catch_ctrl_c();
+    match probe::run_send(&opts) {
+        Ok(reports) => {
+            for r in &reports {
+                println!(
+                    "stream {}  (run {}): sent {} in {:.2} s = {:.1} pkt/s, {:.3} Mbit/s; send errors {}; worst lateness {:.2} ms",
+                    r.stream, r.run_id, r.sent, r.seconds, r.pps, r.mbps, r.errors, r.max_late_ms
+                );
+            }
+            if reports.iter().any(|r| r.max_late_ms > 50.0) {
+                println!(
+                    "note: the sender fell behind its schedule; use more --streams or a lower rate"
+                );
+            }
+            write_json(
+                json,
+                &serde_json::json!({"tool": "dyode probe", "kind": "send", "reports": reports}),
+            );
+        }
+        Err(e) => {
+            eprintln!("probe send: {e}");
+            exit(1);
+        }
+    }
+}
+
+fn probe_recv(mut args: Args) {
+    let listen = sock_addr(
+        "--listen",
+        &args
+            .value(&["--listen"])
+            .unwrap_or_else(|| "0.0.0.0:7000".into()),
+    );
+    let opts = probe::RecvOptions {
+        listen,
+        streams: num::<u16>("--streams", args.value(&["--streams"]))
+            .unwrap_or(1)
+            .max(1),
+        idle: secs("--idle", args.value(&["--idle"])).unwrap_or(std::time::Duration::from_secs(10)),
+        duration: secs("--duration", args.value(&["--duration"])),
+        report_every: secs("--report", args.value(&["--report"]))
+            .unwrap_or(std::time::Duration::from_secs(1)),
+        reorder_ms: num::<f64>("--reorder-ms", args.value(&["--reorder-ms"]))
+            .unwrap_or(500.0)
+            .max(0.0),
+        fec: fec_list(args.value(&["--fec-sim"])),
+        rcvbuf: num::<usize>("--rcvbuf", args.value(&["--rcvbuf"])).unwrap_or(32 << 20),
+        keep: args.flag(&["--keep"]),
+        quiet: args.flag(&["--quiet", "-q"]),
+    };
+    let log = args.value(&["--log"]);
+    let json = args.value(&["--json"]);
+    args.done();
+    let last = u32::from(listen.port()) + u32::from(opts.streams) - 1;
+    println!(
+        "probe: listening on {}:{}{}; stop with Ctrl-C",
+        listen.ip(),
+        listen.port(),
+        if opts.streams > 1 {
+            format!("-{last}")
+        } else {
+            String::new()
+        }
+    );
+    probe::catch_ctrl_c();
+    match probe::run_recv(&opts, log.as_deref().map(Path::new)) {
+        Ok(res) => {
+            for p in &res.ports {
+                if p.rcvbuf < opts.rcvbuf {
+                    println!(
+                        "note: port {} got a {} KiB receive buffer of {} KiB asked; raise net.core.rmem_max or run as root",
+                        p.port,
+                        p.rcvbuf / 1024,
+                        opts.rcvbuf / 1024
+                    );
+                }
+                if p.corrupt > 0 || p.foreign > 0 {
+                    println!(
+                        "port {}: {} damaged probe datagrams (CRC), {} foreign datagrams ignored",
+                        p.port, p.corrupt, p.foreign
+                    );
+                }
+            }
+            if res.reports.is_empty() {
+                println!("no probe packets received");
+            } else if res.reports.len() > 1 {
+                println!("{}", probe::totals_line(&res.reports));
+            }
+            write_json(
+                json,
+                &probe::reports_json("recv", &res.reports, Some(&res.ports)),
+            );
+        }
+        Err(e) => {
+            eprintln!("probe recv: {e}");
+            exit(1);
+        }
+    }
+}
+
+fn probe_analyze(mut args: Args) {
+    let reorder = num::<f64>("--reorder-ms", args.value(&["--reorder-ms"]))
+        .unwrap_or(500.0)
+        .max(0.0);
+    let fec = fec_list(args.value(&["--fec-sim"]));
+    let json = args.value(&["--json"]);
+    if args.items.len() != 1 {
+        die_usage("probe analyze needs one log file (from probe recv --log)");
+    }
+    let file = args.items.remove(0);
+    match probe::analyze_log(Path::new(&file), reorder, &fec) {
+        Ok(reports) => {
+            for r in &reports {
+                print!("{}", r.render());
+            }
+            if reports.len() > 1 {
+                println!("{}", probe::totals_line(&reports));
+            }
+            write_json(json, &probe::reports_json("analyze", &reports, None));
+        }
+        Err(e) => {
+            eprintln!("probe analyze: {e}");
+            exit(1);
+        }
+    }
+}
+
 fn main() {
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() {
@@ -623,6 +986,9 @@ fn main() {
         }
         "interfaces" => cmd_interfaces(args),
         "setup" => cmd_setup(args),
+        "status" => cmd_status(args),
+        "api-token" => cmd_api_token(args),
+        "api-cert" => cmd_api_cert(args),
         "firewall-rules" => {
             let p = args.value(&["-c", "--config"]);
             let iface_only = args.flag(&["--interface"]);
@@ -643,6 +1009,7 @@ fn main() {
         }
         "systemd-unit" => cmd_unit(args),
         "logs" => cmd_logs(args),
+        "probe" => cmd_probe(args),
         "version" | "--version" | "-V" => {
             println!(
                 "dyode {} (lidi 3.0.0, {})",

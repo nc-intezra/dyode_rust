@@ -59,6 +59,20 @@ lidi:
   # log_level: warn        # lidi's own messages: off|error|warn|info|debug
   # send_bind: 10.0.1.1:0  # source of the UDP packets (default dyode_in.ip:0)
 
+# The local API (docs/API.md): each box serves its own status, read-only,
+# on its MANAGEMENT network card (never the diode card), over TLS, to token
+# holders.  The output box also reports the input box, from the status the
+# input box sends through the diode.  Each box uses only its own side.
+# Certificate: sudo dyode api-cert --ip ADDRESS; tokens: sudo dyode api-token
+# add NAME (stored hashed in api-tokens beside this file, per box).
+# api:
+#   in:
+#     listen: 10.20.0.5:8443        # input box, OT management NIC
+#     tls: {cert: api.crt, key: api.key}
+#   out:
+#     listen: 192.168.50.4:8443     # output box, IT NIC
+#     tls: {cert: api.crt, key: api.key}
+
 # Logs always go to stderr as well, so journalctl still works.  Rotation is
 # logrotate's job -- see packaging/logrotate/dyode-transfer.
 logging:
