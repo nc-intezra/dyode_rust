@@ -77,7 +77,11 @@ is a one-line change to `tools/build_binary.sh`.
 `.github/workflows/release.yml`, on every tag (and by hand, and on pull
 requests that touch the installer or tools):
 
-1. **source** -- `cargo generate-lockfile` (if needed) and `cargo vendor`, into
+1. **source** -- on a tag, first `tools/check_release.sh`: the tag,
+   Cargo.toml's version and a *dated* CHANGELOG.md heading
+   (`## [2.1.0] - 2026-10-28`, the newest one) must agree, or nothing is
+   built.  Pull requests get the same check as a notice only.  Then
+   `cargo generate-lockfile` (if needed) and `cargo vendor`, into
    `dyode-<version>-src.tar.gz`.
 2. **binary** -- the binaries are built *from that vendored source with
    `--offline`*, in a Debian 12 container with no network, on native amd64
@@ -92,6 +96,10 @@ requests that touch the installer or tools):
    copy is refused.
 6. **publish** (tags only) -- the bundle, the source tarball and the bare
    binaries are attached to the release, with `SHA256SUMS`.
+
+To release: set the version in Cargo.toml, date its CHANGELOG.md heading,
+merge, check locally with `tools/check_release.sh vX.Y.Z`, then tag
+`vX.Y.Z` on main.
 
 By hand, on a machine with internet and Docker:
 
