@@ -24,7 +24,8 @@ To go faster:
    `UDP socket recv buffer may be too small` otherwise).
 2. Raise `lidi.max_mbps` step by step while watching the output box for
    `lidi: lost block` and `file_rejected ... incomplete`.
-3. On multi-core boxes, add `lidi.ports` (one encode/decode thread each).
+3. On multi-core boxes, add `lidi.ports` (one encode/decode thread each);
+   `dyode check` suggests a list for the box's CPU count.
 4. Raise `lidi.repair` on a lossy link (each point costs ~1% of bandwidth).
 5. ANSSI's own guidance on tuning lidi, including `tc` rate limiting, is in
    lidi's documentation (`doc/tweaking.rst`, `doc/tc_ratelimiter.rst`).
@@ -65,11 +66,29 @@ Several transfers are in flight at once, so they can complete out of order.
 Modbus updates carry a sequence number and an older one never overwrites a
 newer one; log batches are re-ordered by sequence.  Files are independent.
 
-## Not yet run on diode hardware
+## Tested on diode hardware
 
-Tested with unit tests, an in-process loopback test through lidi, and both
-sides end to end over loopback, including a lossy-link simulation.  The
-field fixes recorded in the Python version's CAVEATS (writeback stalls on
-LUKS disks, long transfers and batch timeouts) are addressed by design here
-(continuous writes, activity-based batch timeout), but have not been
-re-verified on real hardware.
+2.0.2 has run on a real diode (reported 2026-10-27): a single 20 GB file
+crossed intact at **800.2 Mbit/s** (the `mbps` of its `batch_sent` event),
+noticeably faster than DYODE (Python) with udpcast, with this `lidi:`
+section on both boxes:
+
+```yaml
+lidi:
+  ports: [5000, 5001, 5002, 5003]
+  max_mbps: 800
+```
+
+The cap, not the link, set that speed: `max_mbps` paces the file's bytes,
+and the bucket's 50 ms starting burst accounts for the extra 0.2 Mbit/s over
+a ~200 s transfer.  On the wire, RaptorQ repair packets (`repair` 5% plus
+lidi's 2%) and packet headers come on top, so the wire carried roughly
+850-900 Mbit/s: most of a gigabit link.
+
+That is one data point for one link: raise `max_mbps` on your own hardware
+only as described above.  Not yet measured on hardware: many small files
+with `parallel_files` above 1, and where the link starts losing blocks above
+800 Mbit/s.  The field fixes recorded in the Python version's CAVEATS
+(writeback stalls on LUKS disks, long transfers and batch timeouts) are
+addressed by design here (continuous writes, activity-based batch timeout);
+the 20 GB transfer exercised the long-transfer case.
