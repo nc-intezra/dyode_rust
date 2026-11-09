@@ -10,7 +10,9 @@
 #   dyode-<version>-src.tar.gz       source + Cargo.lock + vendored crates
 #
 # Runs on tags, by hand ("Run workflow"), and on pull requests that change
-# the installer or the build tools.
+# the installer or the build tools.  On a tag it first runs
+# tools/check_release.sh: the tag, Cargo.toml and a dated CHANGELOG.md
+# heading must agree, or nothing is built.
 name: Release / offline bundle
 
 on:
@@ -40,6 +42,17 @@ jobs:
       version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+      # Before anything is built: Cargo.toml and a dated CHANGELOG heading
+      # must match the tag (a release once shipped as "- unreleased").
+      - name: Release check (tag, Cargo.toml, CHANGELOG.md)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: tools/check_release.sh "${GITHUB_REF_NAME}"
+      - name: Release check preview (does not fail a pull request)
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        run: |
+          v="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          tools/check_release.sh "v$v" ||
+            echo "::notice::tagging v$v now would fail the release check: date its CHANGELOG.md heading first"
       - uses: dtolnay/rust-toolchain@stable
       - id: v
         run: echo "version=$(sed -n 's/^version = \"\(.*\)\"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
