@@ -182,14 +182,18 @@ fn cmd_check(mut args: Args) {
     logging::init(log::LevelFilter::Warn);
     let cfg = load(cfg_path);
     println!("{}: OK", cfg.path.display());
-    println!(
-        "  network: in {} ({}) -> out {} ({}), out MAC {}",
-        cfg.network.in_ip,
-        cfg.network.in_interface,
-        cfg.network.out_ip,
-        cfg.network.out_interface,
-        cfg.network.out_mac.as_deref().unwrap_or("NOT SET")
-    );
+    if cfg.transport == config::TransportKind::Air {
+        println!("  network: not used (transport: air)");
+    } else {
+        println!(
+            "  network: in {} ({}) -> out {} ({}), out MAC {}",
+            cfg.network.in_ip,
+            cfg.network.in_interface,
+            cfg.network.out_ip,
+            cfg.network.out_interface,
+            cfg.network.out_mac.as_deref().unwrap_or("NOT SET")
+        );
+    }
     if cfg.transport == config::TransportKind::Air {
         println!(
             "  air: to {}, listen {}, symbol {}, chunk {}, repair {}%, interleave {}, passes {}, {} Mbit/s (files at ~{:.2} Mbit/s)",
