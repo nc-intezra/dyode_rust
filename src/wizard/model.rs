@@ -1396,7 +1396,9 @@ fn backup(path: &Path) -> std::io::Result<Option<PathBuf>> {
 pub fn apply(d: &Draft, env: &Env) -> Result<Vec<String>, String> {
     let mut done = Vec::new();
     let yaml = d.to_yaml();
-    d.validate(env)?;
+    let parsed = d.validate(env)?;
+    // An imported transport: air config has no diode NIC to wait for.
+    let air = parsed.transport == crate::config::TransportKind::Air;
     if env.dry_run {
         done.push("dry run: nothing written".into());
         done.extend(d.plan(env).into_iter().map(|l| format!("would {l}")));
@@ -1461,7 +1463,7 @@ pub fn apply(d: &Draft, env: &Env) -> Result<Vec<String>, String> {
             (Variant::V2, Side::In) => "serial-in",
             (Variant::V2, Side::Out) => "serial-out",
         };
-        let iface = (d.variant == Variant::V1).then(|| d.my_iface().to_string());
+        let iface = (d.variant == Variant::V1 && !air).then(|| d.my_iface().to_string());
         let text =
             crate::setup::systemd_unit_text(d.side, cmd, &env.etc, &env.binary, iface.as_deref());
         let unit = Path::new("/etc/systemd/system").join(crate::setup::unit_name(d.side));

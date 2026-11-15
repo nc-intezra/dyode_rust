@@ -1,10 +1,10 @@
 [package]
 name = "dyode"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
-description = "DYODE: a low-cost DIY data diode for ICS, with lidi (RaptorQ) as its transport"
+description = "DYODE: a low-cost DIY data diode for ICS, with lidi (RaptorQ) as its transport, or a one-way radio broadcast (air)"
 repository = "https://github.com/nc-intezra/dyode_rust"
 
 [lib]
@@ -39,6 +39,9 @@ getrandom = "0.4"
 glob = "0.3"
 hmac = "0.12"
 libc = "0.2"
+# --- the air transport (docs/AIR.md): RaptorQ blocks, ChaCha20-Poly1305 and HKDF ---
+raptorq = { version = "2", default-features = false, features = ["std"] }
+ring = "0.17"
 log = { version = "0.4", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -49,6 +52,15 @@ toml = "1"
 # --- the local API (feature "api") ---
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 httparse = { version = "1", optional = true }
+
+# The air codec and crypto are slow unoptimised; keep debug builds and
+# tests realistic.
+[profile.dev.package.raptorq]
+opt-level = 3
+[profile.dev.package.ring]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

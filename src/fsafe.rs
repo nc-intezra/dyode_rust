@@ -268,6 +268,23 @@ pub fn scan_ready_files(root: &Path, settle: f64) -> (Vec<(String, PathBuf)>, us
     (ready, waiting)
 }
 
+/// Replace `path` with `data` atomically (write beside it, fsync, rename),
+/// so a crash leaves the old contents or the new, never a mix.
+pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension(format!("tmp{:08x}", crate::auth::random_u32()));
+    let r = (|| {
+        let mut f = File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

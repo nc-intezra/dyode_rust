@@ -4,6 +4,7 @@
 //! The input box runs `dyode in`, the output box `dyode out`; both read the
 //! same config.yaml.  See README.md and docs/ARCHITECTURE.md.
 
+pub mod air;
 #[cfg(feature = "api")]
 pub mod api;
 pub mod apitoken;

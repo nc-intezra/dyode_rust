@@ -189,7 +189,7 @@ pub fn check_unit(
             "{name} runs 'dyode {command}', but this is the {want_cmd} side"
         ));
     }
-    if !serial {
+    if !serial && cfg.transport != crate::config::TransportKind::Air {
         let iface = match side {
             Side::In => &cfg.network.in_interface,
             Side::Out => &cfg.network.out_interface,
@@ -344,6 +344,9 @@ pub fn install_key_copy(source: &Path, dest: &Path) -> Result<(), String> {
 /// datagram for a diode port unless it arrives on the diode NIC from
 /// dyode_in.ip.  Nothing else on the box is touched.
 pub fn firewall_rules(cfg: &crate::config::Config) -> Result<String, String> {
+    if cfg.transport == crate::config::TransportKind::Air {
+        return Ok(air_firewall_rules(cfg));
+    }
     let iface = &cfg.network.out_interface;
     if iface.is_empty()
         || iface.len() > 15
@@ -383,6 +386,36 @@ pub fn firewall_rules(cfg: &crate::config::Config) -> Result<String, String> {
          \t}}\n\
          }}\n"
     ))
+}
+
+/// With `transport: air` there is no diode NIC: packets come from the
+/// local radio software (wfb-ng's `udp_direct_rx`).  Every packet is signed,
+/// so the rule is defence in depth: when air.listen is a loopback address,
+/// its port is refused on every other interface.
+fn air_firewall_rules(cfg: &crate::config::Config) -> String {
+    let l = cfg.air.listen;
+    let rule = if l.ip().is_loopback() {
+        format!(
+            "\t\tudp dport {} iifname != \"lo\" counter drop comment \"DYODE: the air port only from this box's radio software\"\n",
+            l.port()
+        )
+    } else {
+        format!(
+            "\t\t# air.listen {l} is not a loopback address: no address filter (every packet is signed)\n"
+        )
+    };
+    format!(
+        "# Managed by DYODE install.sh (rewritten on each run; --no-firewall to skip).\n\
+         # transport: air, listening on {l}.  Everything else on this box is untouched.\n\
+         table inet dyode\n\
+         delete table inet dyode\n\
+         table inet dyode {{\n\
+         \tchain input {{\n\
+         \t\ttype filter hook input priority -10; policy accept;\n\
+         {rule}\
+         \t}}\n\
+         }}\n"
+    )
 }
 
 #[cfg(test)]
@@ -467,6 +500,20 @@ mod tests {
         let r = firewall_rules(&cfg).unwrap();
         assert!(r.contains("udp dport { 5000, 5001 } iifname != \"eth1\" counter drop"));
         assert!(r.contains("ip saddr != 10.0.1.1"));
+    }
+
+    #[test]
+    fn air_firewall() {
+        let t = "transport: air\nair: {listen: 127.0.0.1:5600}\nmodules:\n  m: {type: modbus, ip: 1.2.3.4, registers: [0-1]}\n";
+        let cfg = crate::config::parse(t, Path::new("c"), Path::new("/")).unwrap();
+        let r = firewall_rules(&cfg).unwrap();
+        assert!(
+            r.contains("udp dport 5600 iifname != \"lo\" counter drop"),
+            "{r}"
+        );
+        let t = t.replace("127.0.0.1:5600", "192.168.7.2:5600");
+        let cfg = crate::config::parse(&t, Path::new("c"), Path::new("/")).unwrap();
+        assert!(!firewall_rules(&cfg).unwrap().contains("drop"));
     }
 
     #[test]

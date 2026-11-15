@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: DYODE local API
-  version: 2.1.0
+  version: 2.2.0
   summary: Each DYODE box serves its own status on its own management network.
   description: |
     Phase 1, read-only.  The input box (OT) and the output box (IT) each run

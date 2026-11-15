@@ -59,6 +59,37 @@ lidi:
   # log_level: warn        # lidi's own messages: off|error|warn|info|debug
   # send_bind: 10.0.1.1:0  # source of the UDP packets (default dyode_in.ip:0)
 
+# Transport: lidi over a wired diode (the default), or 'air': a one-way
+# broadcast over radio (docs/AIR.md) to any number of silent receivers.
+# With air, the lidi section above is not used, and a key is required.
+# transport: air
+# air:
+#   to: 127.0.0.1:5601     # input box: the radio's input (wfb-ng udp_direct_tx)
+#   listen: 127.0.0.1:5600 # output box: where the radio delivers (udp_direct_rx)
+#   max_mbps: 8            # whole packets, Mbit/s: keep below the radio's rate.
+#                          # Files move at about max_mbps / (1 + repair) /
+#                          # passes ('dyode check' prints the figure).
+#   symbol: 1280           # bytes of payload per packet (+54); same on both
+#   chunk: 1048576         # bytes per sealed chunk / RaptorQ block; same on both
+#   repair: 20             # % repair symbols in the first pass
+#   interleave: 16         # chunks interleaved against burst loss
+#   passes: 2              # passes of files and logs; 3 on bad channels or
+#                          # with receivers that join late
+#   pass_gap: 5            # seconds between passes of one object
+#   max_age: 172800        # seconds an object stays valid (needs clocks
+#   clock_skew: 300        #   within this many seconds: use NTP or GPS)
+#   spool: /var/lib/dyode/air-spool   # input box: objects on the carousel
+#   spool_max_mb: 2048
+#   state: /var/lib/dyode/air         # output box: replay state, partial objects
+#   max_objects: 64        # output box limits
+#   max_buffer_mb: 256
+#   max_partial_mb: 65536
+#   orphan_timeout: 600
+# Per module, 'carousel' says how long its objects stay on air:
+#   carousel: {passes: 3} | {until: 3600} | latest
+# Defaults: folder and logs send air.passes passes; modbus, screen and the
+# status channel keep their newest value on air.
+
 # The local API (docs/API.md): each box serves its own status, read-only,
 # on its MANAGEMENT network card (never the diode card), over TLS, to token
 # holders.  The output box also reports the input box, from the status the

@@ -22,6 +22,10 @@ flowchart LR
     LS ==>|"UDP, lidi.ports"| DIODE ==> LR
 ```
 
+With `transport: air` (2.2.0) the same envelopes and module handlers run
+over a one-way radio broadcast instead of lidi: `src/air/`, described in
+[AIR.md](AIR.md).
+
 ## lidi, embedded
 
 lidi (ANSSI-FR, v3.0.0) is used as a library, not as separate daemons:
@@ -131,7 +135,8 @@ lidi needs UDP, so the optocoupler variant keeps DYODE's line framing:
 |---|---|
 | `src/main.rs` | the `dyode` command |
 | `src/runtime.rs` | `in`/`out`/`serial-*`: start lidi and the modules |
-| `src/transport.rs` | lidi configuration, `Uplink`/`ModuleLink`, receive `Lifecycle` |
+| `src/transport.rs` | lidi configuration, `Uplink`/`ModuleLink` (lidi or air), receive `Lifecycle` |
+| `src/air/` | `transport: air`: packet codec and tags (`packet`, `keys`), manifest, carousel rules (`schedule`), `AirSender`, `AirReceiver` |
 | `src/envelope.rs` | the signed envelope: sources (send) and streaming parser (receive) |
 | `src/auth.rs` | key file, HMAC-SHA256, replay window |
 | `src/config.rs` | config.yaml loading and validation |

@@ -71,13 +71,13 @@ fn reg() -> std::sync::MutexGuard<'static, Registry> {
     REG.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// A short hash of everything both boxes must agree on: the lidi
+/// A short hash of everything both boxes must agree on: the transport
 /// parameters and every module's name and type.  Two boxes with different
 /// hashes refuse at least some of each other's traffic.
 pub fn transport_hash(cfg: &Config) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(crate::transport::lidi_toml(cfg).as_bytes());
+    h.update(crate::transport::agreed(cfg).as_bytes());
     for m in &cfg.modules {
         h.update(m.tag());
     }
@@ -158,7 +158,14 @@ pub fn module_stopped(name: &str) {
 
 /// A counter that belongs to no module (lidi aborts, API refusals).
 pub fn count(what: &str) {
-    *reg().global.entry(what.to_string()).or_default() += 1;
+    count_n(what, 1);
+}
+
+/// Add `n` to a box-wide counter.
+pub fn count_n(what: &str, n: u64) {
+    if n > 0 {
+        *reg().global.entry(what.to_string()).or_default() += n;
+    }
 }
 
 /// The input box's static ARP entry, as last checked.

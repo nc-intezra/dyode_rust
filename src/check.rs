@@ -23,14 +23,30 @@ pub fn report(cfg: &Config, side: Option<&str>, serial: bool) -> Report {
     if serial {
         return r;
     }
+    let air = cfg.transport == crate::config::TransportKind::Air;
     match crate::auth::load_key(&cfg.auth) {
         Ok(Some(_)) => r
             .notes
             .push(format!("key: {} OK", cfg.auth.key_file.display())),
+        Ok(None) if air => r.errors.push(
+            "no key: transport air signs every packet and encrypts every chunk with dyode.key, so it needs one \
+             (auth.required: false does not apply)"
+                .into(),
+        ),
         Ok(None) => r
             .warnings
             .push("no key: auth.required is false, so nothing is authenticated".into()),
         Err(e) => r.errors.push(format!("key: {e}")),
+    }
+    if air {
+        air_checks(cfg, side, &mut r);
+        api_checks(cfg, side, &mut r);
+        return r;
+    }
+    if cfg.modules.iter().any(|m| m.carousel.is_some()) {
+        r.warnings.push(
+            "a module sets 'carousel', which only means something with transport: air".into(),
+        );
     }
     if let Err(e) = crate::transport::new_receiver_config_check(cfg) {
         r.errors.push(format!("lidi: {e}"));
@@ -75,6 +91,74 @@ fn unit_checks(cfg: &Config, side: Option<&str>, serial: bool, r: &mut Report) {
                 path.display()
             )),
             Err(_) => {}
+        }
+    }
+}
+
+/// What files will really move at, from the air parameters (design
+/// correction 3: the radio's rate is not the file rate).
+pub fn air_file_rate(cfg: &Config) -> f64 {
+    let a = &cfg.air;
+    let t = f64::from(a.symbol);
+    let per_packet = t / (t + crate::config::AirConfig::OVERHEAD as f64 + 28.0);
+    a.max_mbps * per_packet / (1.0 + f64::from(a.repair) / 100.0) / f64::from(a.passes.max(1))
+}
+
+fn air_checks(cfg: &Config, side: Option<&str>, r: &mut Report) {
+    let a = &cfg.air;
+    let input = side != Some("out");
+    let output = side != Some("in");
+    if input {
+        r.notes.push(format!(
+            "air: input box broadcasts to {} at up to {} Mbit/s; files move at about {:.2} Mbit/s \
+             ({}% repair, {} pass(es))",
+            a.to,
+            a.max_mbps,
+            air_file_rate(cfg),
+            a.repair,
+            a.passes
+        ));
+        if let Err(e) = std::fs::create_dir_all(&a.spool) {
+            r.errors.push(format!(
+                "air.spool: cannot create {}: {e}",
+                a.spool.display()
+            ));
+        }
+        if a.passes < 2 {
+            r.warnings.push(
+                "air.passes is 1: one pass is only safe on a channel without fades (two or three \
+                 are recommended, see docs/AIR.md)"
+                    .into(),
+            );
+        }
+        if a.repair < 10 {
+            r.warnings.push(format!(
+                "air.repair is {}%: a radio channel usually needs 20% or more",
+                a.repair
+            ));
+        }
+    }
+    if output {
+        r.notes.push(format!(
+            "air: output box listens on {}, state in {}",
+            a.listen,
+            a.state.display()
+        ));
+        if let Err(e) = std::fs::create_dir_all(a.state.join("parts")) {
+            r.errors.push(format!(
+                "air.state: cannot create {}: {e}",
+                a.state.display()
+            ));
+        }
+    }
+    for m in &cfg.modules {
+        if let crate::config::ModuleKind::Folder(f) = &m.kind {
+            if f.bitrate.is_some() {
+                r.warnings.push(format!(
+                    "module {:?}: 'bitrate' is ignored with transport air (air.max_mbps paces everything)",
+                    m.name
+                ));
+            }
         }
     }
 }
