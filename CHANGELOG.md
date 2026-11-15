@@ -1,8 +1,42 @@
 # Changelog
 
-## [Unreleased]
+## [2.2.0] - 2026-11-15
 
 ### Added
+
+- **`transport: air`: one-way broadcast over radio** (docs/AIR.md),
+  carrying every module to any number of receivers that never transmit.
+  The input box seals each object (ChaCha20-Poly1305, keys from dyode.key
+  by HKDF-SHA256) in 1 MiB chunks.  Each chunk is one RaptorQ block, and
+  the object is repeated on a carousel of fresh repair symbols in signed
+  DYB1 UDP packets (54 bytes of overhead, 16-byte HMAC tag), paced to
+  `air.max_mbps`.  Made for wfb-ng's `udp_direct_tx`/`udp_direct_rx` with
+  wfb-ng's own FEC off.
+  - Carousel: interleaving windows never shorter than `air.interleave`; at
+    least 8 manifest symbols per pass; K·(1+r) new repair symbols per chunk
+    in every later pass; passes `air.pass_gap` apart.  Per module,
+    `carousel: {passes: N} | {until: S} | latest` (latest is the default
+    for modbus, screen and the status channel).
+  - Receiver:
+    - only the newest sender boot is accepted (boot ids sort by start
+      time);
+    - the done table is saved, so nothing is delivered twice and old
+      recordings are refused after a restart;
+    - manifest expiry;
+    - chunks open before the manifest arrives;
+    - multi-chunk objects resume from `.part` files after a restart;
+    - limits on objects, buffered symbols and partial disk use.
+
+    Complete objects go through the same envelope checks and module
+    handlers as lidi transfers.
+  - `dyode check`, `dyode lidi-config` and `dyode firewall-rules` know
+    about air.  `dyode check` prints the rate files will really move at.
+    New `air_*` counters appear in the status, the API and /metrics.
+  - Tests: `tests/air.rs` covers a lossy channel with bursts and fades,
+    receiver restart with resume, replay after restart, a new sender boot,
+    and an insider's poisoned symbols.
+  - Set it in config.yaml; the setup wizard does not ask about it (it keeps
+    the keys on import).  Not yet run over a radio.
 
 - **`dyode probe`**: measures a one-way link before video or files are
   trusted to it (iperf3 needs a return channel).  It is meant for the
@@ -20,6 +54,9 @@
 
 ### Changed
 
+- The systemd unit of an air box does not wait for a diode NIC
+  (`BindsTo=`): it has none.  The unit check knows this too.
+- Debug and test builds optimise `raptorq`, `ring` and `sha2`.
 - A `lidi.ports` list written without a space after the dashes (`-5000`),
   which YAML reads as one string, is now refused with a message saying so
   instead of "must be a list".

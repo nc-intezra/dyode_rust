@@ -6,13 +6,14 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 
 const USAGE: &str = "\
-DYODE -- a DIY data diode, with lidi (ANSSI) as its transport
+DYODE -- a DIY data diode, with lidi (ANSSI) as its transport, or a one-way
+radio broadcast (transport: air, docs/AIR.md)
 
 Usage: dyode <command> [options]
 
 Running (both boxes read the same config.yaml):
-  in            input side (DYODE v1: sends through lidi)
-  out           output side (DYODE v1: receives through lidi)
+  in            input side (DYODE v1: sends through lidi, or broadcasts)
+  out           output side (DYODE v1: receives through lidi, or a broadcast)
   serial-in     input side of DYODE v2 (Modbus over a serial line)
   serial-out    output side of DYODE v2
     -c, --config FILE      config.yaml (default: ./config.yaml, beside the
@@ -28,7 +29,7 @@ Setting up:
                 the other):  [-c config.yaml] [--key-file FILE]
   check         validate config.yaml and the key:  [-c FILE] [--side in|out]
                 [--serial] (DYODE v2: no key)
-  lidi-config   print the lidi parameters derived from config.yaml  [-c FILE]
+  lidi-config   print the transport parameters derived from config.yaml (lidi or air)  [-c FILE]
   interfaces    list network interfaces with their MAC addresses  [--all]
   firewall-rules  print the output box's nftables rules (diode ports only
                 from the input box, only on the diode NIC)  [-c FILE]
@@ -189,14 +190,29 @@ fn cmd_check(mut args: Args) {
         cfg.network.out_interface,
         cfg.network.out_mac.as_deref().unwrap_or("NOT SET")
     );
-    println!(
-        "  lidi: ports {:?}, MTU {}, block {}, repair {}%, max_clients {}",
-        cfg.lidi.ports,
-        cfg.lidi.mtu,
-        cfg.lidi.block,
-        cfg.lidi.repair,
-        cfg.max_clients()
-    );
+    if cfg.transport == config::TransportKind::Air {
+        println!(
+            "  air: to {}, listen {}, symbol {}, chunk {}, repair {}%, interleave {}, passes {}, {} Mbit/s (files at ~{:.2} Mbit/s)",
+            cfg.air.to,
+            cfg.air.listen,
+            cfg.air.symbol,
+            cfg.air.chunk,
+            cfg.air.repair,
+            cfg.air.interleave,
+            cfg.air.passes,
+            cfg.air.max_mbps,
+            dyode::check::air_file_rate(&cfg)
+        );
+    } else {
+        println!(
+            "  lidi: ports {:?}, MTU {}, block {}, repair {}%, max_clients {}",
+            cfg.lidi.ports,
+            cfg.lidi.mtu,
+            cfg.lidi.block,
+            cfg.lidi.repair,
+            cfg.max_clients()
+        );
+    }
     for m in &cfg.modules {
         let mut ignored: Vec<String> = match &m.kind {
             config::ModuleKind::Folder(f) => f.ignored.clone(),
@@ -262,10 +278,13 @@ fn cmd_unit(mut args: Args) {
             .ok()
             .and_then(|p| config::load(&p).ok())
         {
-            iface = Some(match side {
-                Side::In => cfg.network.in_interface,
-                Side::Out => cfg.network.out_interface,
-            });
+            // transport: air has no diode NIC to wait for.
+            if cfg.transport != config::TransportKind::Air {
+                iface = Some(match side {
+                    Side::In => cfg.network.in_interface,
+                    Side::Out => cfg.network.out_interface,
+                });
+            }
         }
     }
     let command = match (side, serial) {
@@ -982,7 +1001,11 @@ fn main() {
             let p = args.value(&["-c", "--config"]);
             args.done();
             logging::init(log::LevelFilter::Warn);
-            print!("{}", transport::lidi_toml(&load(p)));
+            let cfg = load(p);
+            match cfg.transport {
+                dyode::config::TransportKind::Lidi => print!("{}", transport::lidi_toml(&cfg)),
+                dyode::config::TransportKind::Air => print!("{}", transport::air_summary(&cfg)),
+            }
         }
         "interfaces" => cmd_interfaces(args),
         "setup" => cmd_setup(args),

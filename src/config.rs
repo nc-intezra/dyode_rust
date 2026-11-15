@@ -166,6 +166,122 @@ impl Default for LidiConfig {
     }
 }
 
+/// Which transport carries the modules: lidi over a wired diode, or the
+/// `air` broadcast over a one-way radio (docs/AIR.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransportKind {
+    Lidi,
+    Air,
+}
+
+impl TransportKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TransportKind::Lidi => "lidi",
+            TransportKind::Air => "air",
+        }
+    }
+}
+
+/// How long the air transport keeps repeating one object.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Carousel {
+    /// Send it this many times, then forget it.
+    Passes(u32),
+    /// Keep sending it for this many seconds (at least `air.passes` times).
+    Until(u64),
+    /// Keep sending the newest object of the module until a newer one
+    /// replaces it (Modbus values, screen frames, the status channel).
+    Latest,
+}
+
+impl fmt::Display for Carousel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Carousel::Passes(n) => write!(f, "passes {n}"),
+            Carousel::Until(s) => write!(f, "until {s}s"),
+            Carousel::Latest => f.write_str("latest"),
+        }
+    }
+}
+
+/// The `air:` section: the one-way broadcast transport.
+#[derive(Clone, Debug)]
+pub struct AirConfig {
+    /// Input side: where packets go (wfb-ng's `udp_direct_tx` input).
+    pub to: SocketAddr,
+    /// Input side: source address of the sending socket.
+    pub bind: SocketAddr,
+    /// Output side: where packets arrive (wfb-ng's `udp_direct_rx` output).
+    pub listen: SocketAddr,
+    /// RaptorQ symbol size, bytes; one symbol per packet.
+    pub symbol: u16,
+    /// Plaintext bytes per chunk (one RaptorQ source block each).
+    pub chunk: u32,
+    /// Repair symbols in the first pass, percent of each chunk.
+    pub repair: u16,
+    /// Chunks interleaved together against burst loss.
+    pub interleave: u32,
+    /// Default number of passes for modules with no `carousel`.
+    pub passes: u32,
+    /// Seconds between two passes of one object (time diversity).
+    pub pass_gap: f64,
+    /// Packet rate cap, Mbit/s of whole packets.
+    pub max_mbps: f64,
+    /// Seconds an object stays valid after it was created.
+    pub max_age: u64,
+    /// Seconds of clock difference tolerated between the boxes.
+    pub clock_skew: u64,
+    /// Input side: objects waiting or on the carousel are spooled here.
+    pub spool: PathBuf,
+    /// Input side: spool size before new files wait, MiB.
+    pub spool_max_mb: u64,
+    /// Output side: replay state and partial objects.
+    pub state: PathBuf,
+    /// Output side: objects collected at once.
+    pub max_objects: usize,
+    /// Output side: symbols held in decoders, MiB.
+    pub max_buffer_mb: u64,
+    /// Output side: disk used by partial objects, MiB.
+    pub max_partial_mb: u64,
+    /// Output side: drop an object without a manifest after this much
+    /// silence, seconds.
+    pub orphan_timeout: u64,
+}
+
+impl Default for AirConfig {
+    fn default() -> Self {
+        Self {
+            to: "127.0.0.1:5601".parse().unwrap(),
+            bind: "0.0.0.0:0".parse().unwrap(),
+            listen: "127.0.0.1:5600".parse().unwrap(),
+            symbol: 1280,
+            chunk: 1 << 20,
+            repair: 20,
+            interleave: 16,
+            passes: 2,
+            pass_gap: 5.0,
+            max_mbps: 8.0,
+            max_age: 2 * 86400,
+            clock_skew: 300,
+            spool: PathBuf::from("/var/lib/dyode/air-spool"),
+            spool_max_mb: 2048,
+            state: PathBuf::from("/var/lib/dyode/air"),
+            max_objects: 64,
+            max_buffer_mb: 256,
+            max_partial_mb: 64 * 1024,
+            orphan_timeout: 600,
+        }
+    }
+}
+
+impl AirConfig {
+    /// The bytes a packet adds to its symbol.
+    pub const OVERHEAD: usize = 54;
+    /// wfb-ng's largest payload (WIFI_MTU).
+    pub const MAX_PACKET: usize = 4045;
+}
+
 #[derive(Clone, Debug)]
 pub struct FolderConfig {
     pub input: PathBuf,
@@ -381,6 +497,9 @@ pub struct Module {
     /// shares the lidi ports, and is told apart by its endpoint id.
     pub legacy_port: Option<u16>,
     pub kind: ModuleKind,
+    /// The `carousel` key (air transport only); None = the default for
+    /// the module type.
+    pub carousel: Option<Carousel>,
 }
 
 impl Module {
@@ -439,6 +558,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub auth: AuthConfig,
     pub lidi: LidiConfig,
+    pub transport: TransportKind,
+    pub air: AirConfig,
     pub api: ApiConfig,
     pub modules: Vec<Module>,
 }
@@ -460,6 +581,20 @@ impl Config {
                 _ => 1,
             })
             .sum()
+    }
+
+    /// How the air transport repeats this endpoint's objects.  Modules
+    /// whose newest value replaces the last (Modbus, screen) and the status
+    /// channel keep their newest object on air; files and log lines are
+    /// sent `air.passes` times.
+    pub fn carousel_for(&self, endpoint: u16) -> Carousel {
+        match self.modules.get(usize::from(endpoint)) {
+            None => Carousel::Latest,
+            Some(m) => m.carousel.unwrap_or(match m.kind {
+                ModuleKind::Modbus(_) | ModuleKind::Screen(_) => Carousel::Latest,
+                ModuleKind::Folder(_) | ModuleKind::Logs(_) => Carousel::Passes(self.air.passes),
+            }),
+        }
     }
 
     /// lidi max_clients: configured, or what the modules need plus three
@@ -791,6 +926,20 @@ pub fn parse(text: &str, path: &Path, base_dir: &Path) -> Result<Config> {
     let logging = normalize_logging(key(&raw, "logging"))?;
     let auth = normalize_auth(key(&raw, "auth"), base_dir)?;
     let lidi = normalize_lidi(key(&raw, "lidi"))?;
+    let transport = match key(&raw, "transport") {
+        None => TransportKind::Lidi,
+        Some(v) => match as_text(v)
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase()
+            .as_str()
+        {
+            "lidi" => TransportKind::Lidi,
+            "air" => TransportKind::Air,
+            _ => bail!("'transport' must be lidi or air, got {v:?}"),
+        },
+    };
+    let air = normalize_air(key(&raw, "air"), base_dir)?;
     let api = normalize_api(key(&raw, "api"), base_dir, &network)?;
 
     let cfg = Config {
@@ -803,6 +952,8 @@ pub fn parse(text: &str, path: &Path, base_dir: &Path) -> Result<Config> {
         logging,
         auth,
         lidi,
+        transport,
+        air,
         api,
         modules,
     };
@@ -1170,6 +1321,182 @@ fn normalize_lidi(raw: Option<&Value>) -> Result<LidiConfig> {
     Ok(c)
 }
 
+fn parse_carousel(name: &str, v: &Value) -> Result<Carousel> {
+    let bad = || {
+        ConfigError(format!(
+            "module {name:?}: 'carousel' must be latest, {{passes: N}} or {{until: SECONDS}}, got {v:?}"
+        ))
+    };
+    match v {
+        Value::String(t) if t.trim().eq_ignore_ascii_case("latest") => Ok(Carousel::Latest),
+        Value::Mapping(m) => {
+            if m.len() != 1 {
+                return Err(bad());
+            }
+            if let Some(n) = key(m, "passes") {
+                return match as_i64(n) {
+                    Some(n) if (1..=1000).contains(&n) => Ok(Carousel::Passes(n as u32)),
+                    _ => Err(bad()),
+                };
+            }
+            if let Some(n) = key(m, "until") {
+                return match as_i64(n) {
+                    Some(n) if (1..=30 * 86400).contains(&n) => Ok(Carousel::Until(n as u64)),
+                    _ => Err(bad()),
+                };
+            }
+            Err(bad())
+        }
+        _ => Err(bad()),
+    }
+}
+
+/// The `air:` section.  Read on both boxes whatever `transport` says, so
+/// a mistake shows up before the transport is switched.
+fn normalize_air(raw: Option<&Value>, base_dir: &Path) -> Result<AirConfig> {
+    let mut c = AirConfig::default();
+    let m = match raw {
+        None => return Ok(c),
+        Some(Value::Mapping(m)) => m,
+        Some(_) => bail!("'air' must be a mapping"),
+    };
+    let known = [
+        "to",
+        "bind",
+        "listen",
+        "symbol",
+        "chunk",
+        "repair",
+        "interleave",
+        "passes",
+        "pass_gap",
+        "max_mbps",
+        "max_age",
+        "clock_skew",
+        "spool",
+        "spool_max_mb",
+        "state",
+        "max_objects",
+        "max_buffer_mb",
+        "max_partial_mb",
+        "orphan_timeout",
+    ];
+    let mut unknown: Vec<String> = m
+        .keys()
+        .filter_map(as_text)
+        .filter(|k| !known.contains(&k.as_str()))
+        .collect();
+    if !unknown.is_empty() {
+        unknown.sort();
+        bail!("'air': unknown key(s) {}", unknown.join(", "));
+    }
+    let int = |k: &str, lo: i64, hi: i64| -> Result<Option<i64>> {
+        match key(m, k) {
+            None => Ok(None),
+            Some(v) => match as_i64(v) {
+                Some(n) if (lo..=hi).contains(&n) => Ok(Some(n)),
+                _ => bail!("'air.{k}' must be a whole number between {lo} and {hi}, got {v:?}"),
+            },
+        }
+    };
+    let num = |k: &str, lo: f64, hi: f64| -> Result<Option<f64>> {
+        match key(m, k) {
+            None => Ok(None),
+            Some(v) => match as_f64(v) {
+                Some(n) if n >= lo && n <= hi => Ok(Some(n)),
+                _ => bail!("'air.{k}' must be a number between {lo} and {hi}, got {v:?}"),
+            },
+        }
+    };
+    let addr = |k: &str| -> Result<Option<SocketAddr>> {
+        match key(m, k).and_then(as_text) {
+            None => Ok(None),
+            Some(t) => t
+                .trim()
+                .parse::<SocketAddr>()
+                .map(Some)
+                .map_err(|_| ConfigError(format!("'air.{k}' must be ip:port, got {t:?}"))),
+        }
+    };
+    let dir = |k: &str| -> Option<PathBuf> {
+        key(m, k).and_then(as_text).map(|t| {
+            let p = PathBuf::from(t.trim());
+            if p.is_absolute() { p } else { base_dir.join(p) }
+        })
+    };
+    if let Some(a) = addr("to")? {
+        c.to = a;
+    }
+    if let Some(a) = addr("bind")? {
+        c.bind = a;
+    }
+    if let Some(a) = addr("listen")? {
+        c.listen = a;
+    }
+    let max_symbol = (AirConfig::MAX_PACKET - AirConfig::OVERHEAD) as i64;
+    if let Some(n) = int("symbol", 64, max_symbol)? {
+        c.symbol = n as u16;
+    }
+    if let Some(n) = int("chunk", 4096, 16 << 20)? {
+        c.chunk = n as u32;
+    }
+    if let Some(n) = int("repair", 0, 400)? {
+        c.repair = n as u16;
+    }
+    if let Some(n) = int("interleave", 1, 256)? {
+        c.interleave = n as u32;
+    }
+    if let Some(n) = int("passes", 1, 1000)? {
+        c.passes = n as u32;
+    }
+    if let Some(n) = num("pass_gap", 0.0, 86400.0)? {
+        c.pass_gap = n;
+    }
+    if let Some(n) = num("max_mbps", 0.001, 100_000.0)? {
+        c.max_mbps = n;
+    }
+    if let Some(n) = int("max_age", 60, 365 * 86400)? {
+        c.max_age = n as u64;
+    }
+    if let Some(n) = int("clock_skew", 0, 86400)? {
+        c.clock_skew = n as u64;
+    }
+    if let Some(n) = int("spool_max_mb", 1, 1 << 24)? {
+        c.spool_max_mb = n as u64;
+    }
+    if let Some(n) = int("max_objects", 1, 100_000)? {
+        c.max_objects = n as usize;
+    }
+    if let Some(n) = int("max_buffer_mb", 1, 1 << 20)? {
+        c.max_buffer_mb = n as u64;
+    }
+    if let Some(n) = int("max_partial_mb", 1, 1 << 30)? {
+        c.max_partial_mb = n as u64;
+    }
+    if let Some(n) = int("orphan_timeout", 10, 30 * 86400)? {
+        c.orphan_timeout = n as u64;
+    }
+    if let Some(p) = dir("spool") {
+        c.spool = p;
+    }
+    if let Some(p) = dir("state") {
+        c.state = p;
+    }
+    // One chunk is one RaptorQ source block: at most 56403 source symbols.
+    let k = (u64::from(c.chunk) + 16).div_ceil(u64::from(c.symbol));
+    if k > 56403 {
+        bail!(
+            "'air': chunk {} with symbol {} makes {k} symbols per chunk; RaptorQ allows 56403 (raise symbol or lower chunk)",
+            c.chunk,
+            c.symbol
+        );
+    }
+    if c.spool == c.state {
+        bail!("'air.spool' and 'air.state' must be different folders");
+    }
+    Ok(c)
+}
+
 const UDPCAST_ONLY: [&str; 4] = ["fec", "autostart", "start_timeout", "file_gap"];
 
 /// The most files one folder module sends at once.
@@ -1344,11 +1671,16 @@ fn normalize_module(name: &str, index: u16, props: &Value) -> Result<Module> {
             key(p, "type").and_then(as_text).unwrap_or_default()
         ),
     };
+    let carousel = match key(p, "carousel") {
+        None => None,
+        Some(v) => Some(parse_carousel(name, v)?),
+    };
     Ok(Module {
         name: name.to_string(),
         index,
         legacy_port,
         kind,
+        carousel,
     })
 }
 
@@ -1546,6 +1878,76 @@ mod tests {
         assert!(parse_range("100-100").is_err());
         assert!(parse_range("0-65537").is_err());
         assert!(parse_range("x").is_err());
+    }
+
+    const AIR_MODULES: &str = "modules:\n  f:\n    type: folder\n    in: /a\n    out: /b\n  \
+        m:\n    type: modbus\n    ip: 10.0.0.1\n    registers: [0-3]\n  \
+        l:\n    type: folder\n    in: /c\n    out: /d\n    carousel: {until: 600}\n";
+
+    #[test]
+    fn air_section_and_carousels() {
+        let cfg = load_text(AIR_MODULES).unwrap();
+        assert_eq!(cfg.transport, TransportKind::Lidi, "lidi stays the default");
+        let text = format!(
+            "transport: air\nair:\n  to: 127.0.0.1:5601\n  repair: 30\n  passes: 3\n  state: air-state\n{AIR_MODULES}"
+        );
+        let cfg = load_text(&text).unwrap();
+        assert_eq!(cfg.transport, TransportKind::Air);
+        assert_eq!(cfg.air.repair, 30);
+        assert_eq!(cfg.air.symbol, 1280);
+        assert_eq!(
+            cfg.air.state,
+            Path::new("/etc/dyode/air-state"),
+            "relative to config.yaml"
+        );
+        assert_eq!(
+            cfg.carousel_for(0),
+            Carousel::Passes(3),
+            "files: air.passes"
+        );
+        assert_eq!(
+            cfg.carousel_for(1),
+            Carousel::Latest,
+            "modbus: newest value"
+        );
+        assert_eq!(cfg.carousel_for(2), Carousel::Until(600));
+        assert_eq!(cfg.carousel_for(3), Carousel::Latest, "the status channel");
+        let latest = AIR_MODULES.replace("{until: 600}", "latest");
+        assert_eq!(
+            load_text(&latest).unwrap().carousel_for(2),
+            Carousel::Latest
+        );
+        let three = AIR_MODULES.replace("{until: 600}", "{passes: 5}");
+        assert_eq!(
+            load_text(&three).unwrap().carousel_for(2),
+            Carousel::Passes(5)
+        );
+    }
+
+    #[test]
+    fn air_section_rejections() {
+        let bad = |air: &str| {
+            load_text(&format!("transport: air\nair: {air}\n{AIR_MODULES}"))
+                .unwrap_err()
+                .0
+        };
+        assert!(bad("{reapir: 20}").contains("unknown key"));
+        assert!(
+            bad("{symbol: 4000}").contains("'air.symbol'"),
+            "over wfb-ng's 4045-byte MTU"
+        );
+        assert!(bad("{symbol: 64, chunk: 16000000}").contains("56403"));
+        assert!(bad("{to: localhost}").contains("ip:port"));
+        assert!(bad("{passes: 0}").contains("'air.passes'"));
+        assert!(bad("{spool: /x, state: /x}").contains("different"));
+        let e = load_text(&format!("transport: radio\n{AIR_MODULES}"))
+            .unwrap_err()
+            .0;
+        assert!(e.contains("lidi or air"));
+        let e = load_text(&AIR_MODULES.replace("{until: 600}", "{passes: 2, until: 5}"))
+            .unwrap_err()
+            .0;
+        assert!(e.contains("'carousel'"));
     }
 
     #[test]

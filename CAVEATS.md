@@ -92,3 +92,20 @@ with `parallel_files` above 1, and where the link starts losing blocks above
 (writeback stalls on LUKS disks, long transfers and batch timeouts) are
 addressed by design here (continuous writes, activity-based batch timeout);
 the 20 GB transfer exercised the long-transfer case.
+
+## `transport: air` (2.2.0)
+
+- **Tested in software only:** unit tests, a lossy loopback relay, and the
+  real binaries over loopback.  Not yet run over a radio, and not measured
+  on a Raspberry Pi's CPU.  Measure the link with `dyode probe` first.
+- **The radio is not the diode.**  Keep a wired diode between the protected
+  network and the radio box.  See docs/AIR.md.
+- **Every receiver holds the key**, so a compromised receiver can forge
+  objects for the others.  It cannot reach the protected side through the
+  wired diode.
+- **Files move far slower than the radio's rate.**  For example about
+  4 Mbit/s at wfb-ng MCS1 with the defaults.  `dyode check` prints the
+  figure for your settings.
+- **Clocks.**  Keep both boxes within `air.clock_skew` (NTP or GPS):
+  objects expire and future boots are refused by the clock.
+

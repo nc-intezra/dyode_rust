@@ -34,6 +34,17 @@ in a signed DYODE envelope (HMAC-SHA256 with a key shared by both boxes, plus
 replay protection).  lidi's RaptorQ coding replaces udpcast and DYODE's own
 UDP framing.  See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Over radio: `transport: air`
+
+New in 2.2.0: instead of lidi over a wired diode, the modules can be
+broadcast one way over a radio link (for example raw-injection Wi-Fi with
+wfb-ng) to any number of silent receivers.  Each object is sealed
+(ChaCha20-Poly1305), cut into RaptorQ blocks, and repeated on a carousel of
+fresh repair symbols in signed UDP packets.  Receivers can join late,
+resume after a restart and never answer.  The one-way guarantee still comes
+from a wired diode in front of the radio box.  Tested in software only so
+far.  See [docs/AIR.md](docs/AIR.md).
+
 ## Quick start
 
 Air-gapped box?  Carry `dyode-<version>-offline.tar.gz` from the release
