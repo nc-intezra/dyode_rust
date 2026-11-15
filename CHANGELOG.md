@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.2.1] - 2026-11-15
+
+### Fixed
+
+- `transport: air`: the `dyode_in` / `dyode_out` sections are not needed
+  and can be left out.
+  - `dyode check` now prints `network: not used (transport: air)` instead
+    of placeholder addresses.
+  - The local API no longer refuses to listen on a card named as the
+    "diode NIC". With air there is none, and the default name (`eth0` on
+    the input side) could refuse the box's real management card.
+
 ## [2.2.0] - 2026-11-15
 
 ### Added

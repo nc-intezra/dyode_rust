@@ -122,7 +122,9 @@ air:
   # orphan_timeout: 600
 ```
 
-Relative `spool` and `state` paths are relative to config.yaml.  Every key
+Relative `spool` and `state` paths are relative to config.yaml.  The
+`dyode_in` / `dyode_out` sections are not used by `air` and can be left
+out (2.2.1).  Every key
 is listed in `config.example.yaml`.
 
 **Per module**, `carousel` sets how long an object stays on air:

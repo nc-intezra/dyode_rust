@@ -63,6 +63,11 @@ pub fn tls_config(
 
 /// Refuse to listen on the diode NIC, whatever address it was given.
 fn check_not_diode(cfg: &Config, side: Side, listen: SocketAddr) -> Result<(), String> {
+    // transport: air has no diode NIC; dyode_in/dyode_out may be absent
+    // and their default interface names would refuse a real NIC.
+    if cfg.transport == crate::config::TransportKind::Air {
+        return Ok(());
+    }
     let diode_if = match side {
         Side::In => &cfg.network.in_interface,
         Side::Out => &cfg.network.out_interface,
@@ -385,6 +390,21 @@ pub const ROUTES: [&str; 5] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With air there is no diode NIC: an API on an address of the
+    /// interface named in dyode_in is allowed; with lidi it is refused.
+    #[test]
+    fn diode_nic_guard_skipped_for_air() {
+        let base = "dyode_in: {ip: 10.0.1.1, interface: lo}\nmodules:\n  m: {type: modbus, ip: 1.2.3.4, registers: [0-1]}\n";
+        let listen: SocketAddr = "127.0.0.1:8443".parse().unwrap();
+        let lidi = crate::config::parse(base, std::path::Path::new("c"), std::path::Path::new("/"))
+            .unwrap();
+        assert!(check_not_diode(&lidi, Side::In, listen).is_err());
+        let air = format!("transport: air\n{base}");
+        let air = crate::config::parse(&air, std::path::Path::new("c"), std::path::Path::new("/"))
+            .unwrap();
+        assert!(check_not_diode(&air, Side::In, listen).is_ok());
+    }
 
     #[test]
     fn openapi_lists_exactly_the_routes() {
